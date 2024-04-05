@@ -1,0 +1,16 @@
+x unit test splicing data
+x review & document data model / expiry
+- validate incoming chain data from rpc
+- create index for records(table_id, key)
+- add point-in-time records query
+- perf test on large response sizes
+- find a good response compression strategy
+- control reset start point from flags
+- advisory lock for ensuring 1 indexer
+- detect reorg and undo
+- review potential for  batching rpc / pg ops
+- http request timeout
+- pg query timeout
+- http rate limiter
+- http error handler
+- eth url and db url from flags
