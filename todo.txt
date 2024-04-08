@@ -1,16 +1,20 @@
 x unit test splicing data
 x review & document data model / expiry
-- validate incoming chain data from rpc
+- http error handler
+- add api specs to readme
+- return correct data for the records api
 - create index for records(table_id, key)
+- validate incoming chain data from rpc
 - add point-in-time records query
 - perf test on large response sizes
 - find a good response compression strategy
 - control reset start point from flags
 - advisory lock for ensuring 1 indexer
 - detect reorg and undo
-- review potential for  batching rpc / pg ops
-- http request timeout
+- review potential for batching rpc / pg ops
+- http server timeouts
+- rpc client timeouts
 - pg query timeout
 - http rate limiter
-- http error handler
 - eth url and db url from flags
+- integration test that hits real endpoints with stable data
