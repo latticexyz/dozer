@@ -1,6 +1,6 @@
 x unit test splicing data
 x review & document data model / expiry
-- http error handler
+x http error handler
 - add api specs to readme
 - return correct data for the records api
 - create index for records(table_id, key)

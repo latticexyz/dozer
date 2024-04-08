@@ -11,8 +11,7 @@ use alloy::{
 use axum::{
     body::Body,
     extract::{MatchedPath, State},
-    http::Request,
-    response::Response,
+    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
@@ -24,7 +23,7 @@ use std::{cmp, str::FromStr, time::Duration};
 use tokio;
 use tokio_postgres::{NoTls, Row, Transaction};
 use tower_http::trace::TraceLayer;
-use tracing::{info, info_span, Level, Span};
+use tracing;
 use tracing_subscriber::FmtSubscriber;
 
 sol! {
@@ -73,7 +72,7 @@ async fn main() -> eyre::Result<()> {
         .with_level(false)
         .with_target(false)
         .without_time()
-        .with_max_level(Level::INFO)
+        .with_max_level(tracing::Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
@@ -96,8 +95,8 @@ async fn main() -> eyre::Result<()> {
     };
 
     {
-        let conn = config.pool.get().await?;
-        conn.batch_execute(SCHEMA).await?;
+        let conn = config.pool.get().await.wrap_err("getting pg connection")?;
+        conn.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
         init_blocks(&config).await?
     }
     let (app, listener) = (
@@ -107,16 +106,23 @@ async fn main() -> eyre::Result<()> {
             .with_state(config.clone())
             .layer(
                 TraceLayer::new_for_http()
-                    .make_span_with(|request: &Request<_>| {
+                    .make_span_with(|request: &axum::http::Request<_>| {
                         let matched_path = request
                             .extensions()
                             .get::<MatchedPath>()
                             .map(MatchedPath::as_str);
-                        info_span!("http", matched_path)
+                        tracing::info_span!("http", matched_path)
                     })
-                    .on_response(|_: &Response<Body>, latency: Duration, _: &Span| {
-                        info!(latency = latency.as_millis())
-                    }),
+                    .on_failure(
+                        |_error: tower_http::classify::ServerErrorsFailureClass,
+                         _latency: Duration,
+                         _span: &tracing::Span| {},
+                    )
+                    .on_response(
+                        |_: &axum::http::Response<Body>, latency: Duration, _: &tracing::Span| {
+                            tracing::info!(latency = latency.as_millis())
+                        },
+                    ),
             ),
         tokio::net::TcpListener::bind("localhost:3000")
             .await
@@ -151,12 +157,49 @@ impl GetRecsResp {
         })
     }
 }
+enum ApiError {
+    User(axum::http::StatusCode, String),
+    Server(eyre::Report),
+}
+
+#[derive(Serialize)]
+struct ApiErrorMessage {
+    msg: String,
+}
+
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, message) = match self {
+            Self::User(status, msg) => {
+                tracing::error!("user-error={}", msg);
+                (status, msg)
+            }
+            Self::Server(e) => {
+                tracing::error!(%e, "server-error={:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    String::from("server error"),
+                )
+            }
+        };
+        let m = ApiErrorMessage {
+            msg: String::from(message),
+        };
+        (status, Json(m)).into_response()
+    }
+}
+
+impl From<eyre::Report> for ApiError {
+    fn from(value: eyre::Report) -> Self {
+        ApiError::Server(value)
+    }
+}
 
 async fn get_records(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
-) -> Json<Vec<GetRecsResp>> {
-    let conn = state.pool.get().await.expect("unable to get db conn");
+) -> Result<Json<Vec<GetRecsResp>>, ApiError> {
+    let conn = state.pool.get().await.wrap_err("getting conn from pool")?;
     let rows = conn
         .query(
             "
@@ -169,9 +212,9 @@ async fn get_records(
             &[&req.table_id, &req.key],
         )
         .await
-        .unwrap();
+        .wrap_err("querying records table")?;
     let resp: Result<Vec<GetRecsResp>, _> = rows.iter().map(GetRecsResp::from_row).collect();
-    Json(resp.unwrap())
+    Ok(Json(resp.unwrap()))
 }
 
 async fn init_blocks(config: &Config) -> eyre::Result<()> {
@@ -217,7 +260,7 @@ async fn index(config: &Config) -> eyre::Result<()> {
         }
         let delta = cmp::min(remote_num - local_num, 100);
         let (from, to) = (local_num + 1, local_num + delta);
-        info!(
+        tracing::info!(
             remote = remote_num,
             local = local_num,
             from = from,
@@ -262,7 +305,7 @@ async fn index(config: &Config) -> eyre::Result<()> {
 }
 
 async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> eyre::Result<()> {
-    info!(n = logs.len(), "process_logs");
+    tracing::info!(n = logs.len(), "process_logs");
     for log in logs {
         let (block_num, log_idx) = (
             log.block_number.wrap_err("missing block num from log")?,

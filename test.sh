@@ -1,5 +1,5 @@
 set -e
-curl http://localhost:3000/records -H 'Content-Type: application/json' -d '{
+curl http://localhost:3000/records -i -H 'Content-Type: application/json' -d '{
 	"table_id": "0x746273746f72650000000000000000005461626c657300000000000000000000",
 	"key": ["0x74620000000000000000000000000000436f756e746572000000000000000000"]
 }'
