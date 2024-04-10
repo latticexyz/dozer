@@ -64,3 +64,26 @@ not carry forward the previous static_data, dynamic_lengths, or
 dynamic_data.
 
 Many logs for a particular table_id/key may exist within a block.
+
+API
+
+> POST /records
+> {
+>   "table_id": ResourceId,
+>   "key": Hex[]
+>   "block_num": bigint,
+> }
+
+< [
+<   {
+<     "table_id": ResourceId,
+<     "key": Hex[]
+<     "static_data": Hex,
+<     "encoded_length": EncodedLengths,
+<     "dynamic_data": Hex,
+<     "block_num": bigint,
+<     "log_idx": number,
+<   }
+< ]
+
+block_num: latest version of record as of the specificed block height.

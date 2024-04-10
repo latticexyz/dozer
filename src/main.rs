@@ -1,5 +1,5 @@
 use alloy::{
-    primitives::{BlockHash, FixedBytes},
+    primitives::{BlockHash, Bytes, FixedBytes},
     providers::{Provider, ProviderBuilder, ReqwestProvider},
     rpc::{
         self,
@@ -21,7 +21,10 @@ use ruint::aliases::U64;
 use serde::{Deserialize, Serialize};
 use std::{cmp, str::FromStr, time::Duration};
 use tokio;
-use tokio_postgres::{NoTls, Row, Transaction};
+use tokio_postgres::{
+    types::{FromSql, Type},
+    NoTls, Row, Transaction,
+};
 use tower_http::trace::TraceLayer;
 use tracing;
 use tracing_subscriber::FmtSubscriber;
@@ -30,19 +33,22 @@ sol! {
  type EncodedLengths is bytes32;
  type ResourceId is bytes32;
  event HelloStore(bytes32 indexed storeVersion);
+ #[derive(Debug)]
  event Store_SetRecord(
      ResourceId indexed table_id,
      bytes32[] key_tuple,
      bytes static_data,
-     EncodedLengths dynamic_lengths,
+     EncodedLengths encoded_lengths,
      bytes dynamic_data
  );
+ #[derive(Debug)]
  event Store_SpliceStaticData(
      ResourceId indexed table_id,
      bytes32[] key_tuple,
      uint48 start,
      bytes data
  );
+ #[derive(Debug)]
  event Store_SpliceDynamicData(
      ResourceId indexed table_id,
      bytes32[] key_tuple,
@@ -52,6 +58,7 @@ sol! {
      EncodedLengths encoded_lengths,
      bytes data
  );
+ #[derive(Debug)]
  event Store_DeleteRecord(
      ResourceId indexed table_id,
      bytes32[] key_tuple
@@ -86,7 +93,11 @@ async fn main() -> eyre::Result<()> {
     );
     let pg_pool = Pool::builder(pg_mgr).max_size(16).build()?;
     let eth_client = ProviderBuilder::new()
-        .on_reqwest_http("http://localhost:8545".parse().unwrap())
+        .on_reqwest_http(
+            "https://rpc.holesky.redstone.xyz"
+                .parse()
+                .expect("unable to parse rpc url"),
+        )
         .expect("unable to build eth client");
 
     let config = Config {
@@ -139,24 +150,6 @@ async fn main() -> eyre::Result<()> {
     axum::serve(listener, app).await.wrap_err("serving http")
 }
 
-#[derive(Deserialize)]
-struct GetRecsReq {
-    table_id: FixedBytes<32>,
-    key: Vec<FixedBytes<32>>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct GetRecsResp {
-    log_idx: U64,
-}
-
-impl GetRecsResp {
-    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
-        Ok(GetRecsResp {
-            log_idx: row.try_get("log_idx")?,
-        })
-    }
-}
 enum ApiError {
     User(axum::http::StatusCode, String),
     Server(eyre::Report),
@@ -195,6 +188,33 @@ impl From<eyre::Report> for ApiError {
     }
 }
 
+#[derive(Deserialize)]
+struct GetRecsReq {
+    table_id: FixedBytes<32>,
+    key: Vec<FixedBytes<32>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GetRecsResp {
+    block_num: U64,
+    log_idx: U64,
+    static_data: PgBytes,
+    encoded_lengths: FixedBytes<32>,
+    dynamic_data: PgBytes,
+}
+
+impl GetRecsResp {
+    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
+        Ok(GetRecsResp {
+            block_num: row.try_get("block_num")?,
+            log_idx: row.try_get("log_idx")?,
+            static_data: row.try_get("static_data")?,
+            encoded_lengths: row.try_get("encoded_lengths")?,
+            dynamic_data: row.try_get("dynamic_data")?,
+        })
+    }
+}
+
 async fn get_records(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
@@ -203,7 +223,7 @@ async fn get_records(
     let rows = conn
         .query(
             "
-            select log_idx, static_data, dynamic_lengths, dynamic_data
+            select block_num, log_idx, static_data, encoded_lengths, dynamic_data
             from records
             where table_id = $1
             and key = $2
@@ -258,7 +278,7 @@ async fn index(config: &Config) -> eyre::Result<()> {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
-        let delta = cmp::min(remote_num - local_num, 100);
+        let delta = cmp::min(remote_num - local_num, 10000);
         let (from, to) = (local_num + 1, local_num + delta);
         tracing::info!(
             remote = remote_num,
@@ -275,13 +295,14 @@ async fn index(config: &Config) -> eyre::Result<()> {
                 &Store_SpliceStaticData::SIGNATURE,
                 &Store_DeleteRecord::SIGNATURE,
             ])
-            .select(from..to);
+            .from_block(from)
+            .to_block(to);
         let mut logs = config
             .eth
             .get_logs(&filter)
             .await
             .wrap_err("downloading logs")?;
-        logs.sort_by_key(|l| l.log_index);
+        logs.sort_by_key(|l| (l.block_number, l.log_index));
 
         let to_hash = config
             .eth
@@ -304,6 +325,7 @@ async fn index(config: &Config) -> eyre::Result<()> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> eyre::Result<()> {
     tracing::info!(n = logs.len(), "process_logs");
     for log in logs {
@@ -323,26 +345,14 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> 
                     .wrap_err("decoding splice dynamic")?;
                 let new_rec = splice_dynamic(&tx, &rec).await?;
                 expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, false).await?;
-                set_record(
-                    &tx,
-                    log.block_number.unwrap(),
-                    log.log_index.unwrap(),
-                    &new_rec,
-                )
-                .await?
+                set_record(&tx, block_num, log_idx, &new_rec).await?;
             }
             &Store_SpliceStaticData::SIGNATURE_HASH => {
                 let rec = Store_SpliceStaticData::decode_log_data(log.data(), true)
                     .wrap_err("decoding splice static")?;
                 let new_rec = splice_static(&tx, &rec).await?;
                 expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, false).await?;
-                set_record(
-                    &tx,
-                    log.block_number.unwrap(),
-                    log.log_index.unwrap(),
-                    &new_rec,
-                )
-                .await?
+                set_record(&tx, block_num, log_idx, &new_rec).await?
             }
             &Store_DeleteRecord::SIGNATURE_HASH => {
                 let rec = Store_DeleteRecord::decode_log_data(log.data(), true)
@@ -363,14 +373,14 @@ async fn set_record(
 ) -> eyre::Result<()> {
     tx.execute(
         "
-        insert into records(table_id, key, static_data, dynamic_lengths, dynamic_data, block_num, log_idx)
+        insert into records(table_id, key, static_data, encoded_lengths, dynamic_data, block_num, log_idx)
         values($1, $2, $3, $4, $5, $6, $7)
         ",
         &[
             &record.table_id,
             &record.key_tuple,
             &record.static_data.to_vec(),
-            &record.dynamic_lengths,
+            &record.encoded_lengths,
             &record.dynamic_data.to_vec(),
             &U64::from(block_num),
             &U64::from(log_idx),
@@ -418,46 +428,43 @@ async fn splice_static(
     let prev = tx
         .query(
             "
-            select static_data, dynamic_lengths, dynamic_data
+            select static_data, encoded_lengths, dynamic_data
             from records
             where table_id = $1
             and key = $2
             and expired_block_num is null
+            and not deleted
             ",
             &[&record.table_id, &record.key_tuple],
         )
         .await?;
-    let (sdata, dlen, ddata) = match prev.len() {
-        0 => (
-            vec![0u8; record.start as usize + record.data.len()],
-            FixedBytes::new([0u8; 32]),
-            Vec::new(),
-        ),
+    let (mut sdata, dlen, ddata) = match prev.len() {
+        0 => (vec![], FixedBytes::new([0u8; 32]), vec![]),
         1 => (
-            prev.first().unwrap().get::<usize, Vec<u8>>(0).into(),
-            prev.first().unwrap().get::<usize, FixedBytes<32>>(1).into(),
-            prev.first().unwrap().get::<usize, Vec<u8>>(2).into(),
+            prev.first().unwrap().get("static_data"),
+            prev.first().unwrap().get("encoded_lengths"),
+            prev.first().unwrap().get("dynamic_data"),
         ),
         _ => {
             return Err(eyre!("multiple previous records found"));
         }
     };
-    let new_rec = Store_SetRecord {
+    splice(
+        &mut sdata,
+        record.start as usize,
+        record.data.len(),
+        &record.data,
+    );
+    Ok(Store_SetRecord {
         table_id: record.table_id,
         key_tuple: record.key_tuple.clone(),
         static_data: sdata.into(),
-        dynamic_lengths: dlen,
+        encoded_lengths: dlen,
         dynamic_data: ddata.into(),
-    };
-    splice(
-        new_rec.static_data.to_vec().as_mut(),
-        record.start as usize,
-        record.data.len(),
-        record.data.to_vec(),
-    )?;
-    Ok(new_rec)
+    })
 }
 
+#[tracing::instrument(skip_all)]
 async fn splice_dynamic(
     tx: &Transaction<'_>,
     record: &Store_SpliceDynamicData,
@@ -470,107 +477,139 @@ async fn splice_dynamic(
             where table_id = $1
             and key = $2
             and expired_block_num is null
+            and not deleted
             ",
             &[&record.table_id, &record.key_tuple],
         )
         .await
         .wrap_err("unable to find prev record to update")?;
-    let (sdata, ddata) = match prev.len() {
-        0 => (
-            vec![0u8; record.start as usize + record.data.len()],
-            Vec::new(),
-        ),
+    let (sdata, mut ddata) = match prev.len() {
+        0 => (vec![], vec![]),
         1 => (
-            prev.first().unwrap().get::<usize, Vec<u8>>(0).into(),
-            prev.first().unwrap().get::<usize, Vec<u8>>(2).into(),
+            prev.first().unwrap().get("static_data"),
+            prev.first().unwrap().get("dynamic_data"),
         ),
         _ => {
             return Err(eyre!("multiple previous records found"));
         }
     };
-
-    let new_rec = Store_SetRecord {
+    splice(
+        &mut ddata,
+        record.start as usize,
+        record.delete_count as usize,
+        &record.data,
+    );
+    Ok(Store_SetRecord {
         table_id: record.table_id,
         key_tuple: record.key_tuple.clone(),
         static_data: sdata.into(),
-        dynamic_lengths: record.encoded_lengths.clone(),
+        encoded_lengths: record.encoded_lengths.clone(),
         dynamic_data: ddata.into(),
-    };
-    splice(
-        new_rec.dynamic_data.to_vec().as_mut(),
-        record.start as usize,
-        record.delete_count as usize,
-        record.data.to_vec(),
-    )?;
-    Ok(new_rec)
+    })
 }
 
 // removes n bytes from data starting at i (zero-based indexing)
 // inserts new into data at i
-// returns error if i > data.len()
-// returns error if new increases data.len() and new isn't added/removed from the end (i + n != data.len())
-fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: Vec<u8>) -> Result<(), eyre::Error> {
+fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: &Bytes) {
     if i > data.len() {
-        return Err(eyre!("splice start past data length"));
+        data.resize(i, 0);
     }
-    if new.len().abs_diff(n) > 0 && i + n != data.len() {
-        return Err(eyre!("data size increase and new data is not at the end"));
-    }
-    data.drain(i..i + n);
-    data.splice(i..i, new.into_iter());
-    Ok(())
+    let end = std::cmp::min(i + n, data.len());
+    data.splice(i..end, new.as_ref().iter().copied());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    fn test_splice_add_empty() {
+        let mut data = vec![];
+        splice(&mut data, 0, 0, &Bytes::from([1]));
+        assert_eq!(data, vec![1]);
+    }
+    #[test]
+    fn test_splice_add_end() {
+        let mut data = vec![];
+        splice(&mut data, 2, 0, &Bytes::from([4, 5, 6]));
+        assert_eq!(data, vec![0, 0, 4, 5, 6]);
+    }
+    #[test]
     fn test_splice_beginning() {
         let mut data = vec![9, 2, 3];
-        let res = splice(&mut data, 0, 1, vec![1]);
-        assert!(!res.is_err());
+        splice(&mut data, 0, 1, &Bytes::from([1]));
         assert_eq!(data, vec![1, 2, 3]);
     }
     #[test]
     fn test_splice_middle() {
         let mut data = vec![1, 9, 3];
-        let res = splice(&mut data, 1, 1, vec![2]);
-        assert!(!res.is_err());
+        splice(&mut data, 1, 1, &Bytes::from([2]));
         assert_eq!(data, vec![1, 2, 3]);
     }
     #[test]
     fn test_splice_end() {
         let mut data = vec![1, 2, 9];
-        let res = splice(&mut data, 2, 1, vec![3]);
-        assert!(!res.is_err());
+        splice(&mut data, 2, 1, &Bytes::from([3]));
         assert_eq!(data, vec![1, 2, 3]);
     }
     #[test]
     fn test_splice_increase_end() {
         let mut data = vec![1, 2, 3];
-        let res = splice(&mut data, 3, 0, vec![4]);
-        assert!(!res.is_err());
+        splice(&mut data, 3, 0, &Bytes::from([4]));
         assert_eq!(data, vec![1, 2, 3, 4]);
     }
     #[test]
     fn test_splice_decrease_end() {
         let mut data = vec![1, 2, 3];
-        let res = splice(&mut data, 2, 1, vec![]);
-        assert!(!res.is_err());
+        splice(&mut data, 2, 1, &Bytes::new());
         assert_eq!(data, vec![1, 2]);
     }
     #[test]
     fn test_splice_increase_middle() {
-        let mut data = vec![1, 2, 9];
-        let res = splice(&mut data, 1, 0, vec![3, 4, 5, 6, 7, 8]);
-        assert!(res.is_err());
-        assert_eq!(data, vec![1, 2, 9]);
+        let mut data = vec![1, 8, 9];
+        splice(&mut data, 1, 0, &Bytes::from([2, 3, 4, 5, 6, 7]));
+        assert_eq!(data, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     }
     #[test]
     fn test_splice_start_out_of_bounds() {
         let mut data = vec![1, 2, 3];
-        let res = splice(&mut data, 4, 1, vec![4]);
-        assert!(res.is_err());
-        assert_eq!(data, vec![1, 2, 3]);
+        splice(&mut data, 4, 1, &Bytes::from([4]));
+        assert_eq!(data, vec![1, 2, 3, 0, 4]);
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct PgBytes(Bytes);
+
+impl FromSql<'_> for PgBytes {
+    fn from_sql(ty: &Type, raw: &[u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if *ty == Type::BYTEA {
+            Ok(PgBytes(Bytes::copy_from_slice(raw)))
+        } else {
+            Err(format!("expected BYTEA, found {:?}", ty).into())
+        }
+    }
+
+    fn from_sql_null(_: &Type) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(PgBytes(Bytes::new()))
+    }
+
+    fn from_sql_nullable(
+        ty: &Type,
+        raw: Option<&[u8]>,
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        match raw {
+            Some(raw_data) => Self::from_sql(ty, raw_data),
+            None => Self::from_sql_null(ty),
+        }
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::BYTEA
+    }
+}
+
+impl From<PgBytes> for Bytes {
+    fn from(pg_bytes: PgBytes) -> Self {
+        pg_bytes.0
     }
 }

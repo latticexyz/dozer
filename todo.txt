@@ -1,11 +1,13 @@
 x unit test splicing data
 x review & document data model / expiry
 x http error handler
+x index all of holesky chain and spot check on render db
+x create index for records(table_id, key)
 - add api specs to readme
 - return correct data for the records api
-- create index for records(table_id, key)
 - validate incoming chain data from rpc
 - add point-in-time records query
+- figure out tracing. possibly use minitrace
 - perf test on large response sizes
 - find a good response compression strategy
 - control reset start point from flags
