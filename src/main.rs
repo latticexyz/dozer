@@ -21,10 +21,7 @@ use ruint::aliases::U64;
 use serde::{Deserialize, Serialize};
 use std::{cmp, str::FromStr, time::Duration};
 use tokio;
-use tokio_postgres::{
-    types::{FromSql, Type},
-    NoTls, Row, Transaction,
-};
+use tokio_postgres::{NoTls, Row, Transaction};
 use tower_http::trace::TraceLayer;
 use tracing;
 use tracing_subscriber::FmtSubscriber;
@@ -198,9 +195,9 @@ struct GetRecsReq {
 struct GetRecsResp {
     block_num: U64,
     log_idx: U64,
-    static_data: PgBytes,
+    static_data: Bytes,
     encoded_lengths: FixedBytes<32>,
-    dynamic_data: PgBytes,
+    dynamic_data: Bytes,
 }
 
 impl GetRecsResp {
@@ -208,9 +205,9 @@ impl GetRecsResp {
         Ok(GetRecsResp {
             block_num: row.try_get("block_num")?,
             log_idx: row.try_get("log_idx")?,
-            static_data: row.try_get("static_data")?,
+            static_data: Bytes::copy_from_slice(row.try_get("static_data")?),
             encoded_lengths: row.try_get("encoded_lengths")?,
-            dynamic_data: row.try_get("dynamic_data")?,
+            dynamic_data: Bytes::copy_from_slice(row.try_get("dynamic_data")?),
         })
     }
 }
@@ -574,42 +571,5 @@ mod tests {
         let mut data = vec![1, 2, 3];
         splice(&mut data, 4, 1, &Bytes::from([4]));
         assert_eq!(data, vec![1, 2, 3, 0, 4]);
-    }
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct PgBytes(Bytes);
-
-impl FromSql<'_> for PgBytes {
-    fn from_sql(ty: &Type, raw: &[u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        if *ty == Type::BYTEA {
-            Ok(PgBytes(Bytes::copy_from_slice(raw)))
-        } else {
-            Err(format!("expected BYTEA, found {:?}", ty).into())
-        }
-    }
-
-    fn from_sql_null(_: &Type) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        Ok(PgBytes(Bytes::new()))
-    }
-
-    fn from_sql_nullable(
-        ty: &Type,
-        raw: Option<&[u8]>,
-    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
-        match raw {
-            Some(raw_data) => Self::from_sql(ty, raw_data),
-            None => Self::from_sql_null(ty),
-        }
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        *ty == Type::BYTEA
-    }
-}
-
-impl From<PgBytes> for Bytes {
-    fn from(pg_bytes: PgBytes) -> Self {
-        pg_bytes.0
     }
 }
