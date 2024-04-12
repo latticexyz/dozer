@@ -164,6 +164,12 @@ struct ApiErrorMessage {
     msg: String,
 }
 
+impl From<tokio_postgres::Error> for ApiError {
+    fn from(err: tokio_postgres::Error) -> Self {
+        ApiError::Server(eyre!("database-error={}", err.to_string()))
+    }
+}
+
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
@@ -237,8 +243,11 @@ async fn get_records(
         )
         .await
         .wrap_err("querying records table")?;
-    let resp: Result<Vec<GetRecsResp>, _> = rows.iter().map(GetRecsResp::from_row).collect();
-    Ok(Json(resp.unwrap()))
+    Ok(Json(
+        rows.iter()
+            .map(GetRecsResp::from_row)
+            .collect::<Result<Vec<_>, _>>()?,
+    ))
 }
 
 async fn init_blocks(config: &Config) -> eyre::Result<()> {
