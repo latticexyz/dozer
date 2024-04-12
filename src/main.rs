@@ -366,8 +366,7 @@ async fn index(config: &Config) -> eyre::Result<(), IndexError> {
             &Store_SpliceStaticData::SIGNATURE,
             &Store_DeleteRecord::SIGNATURE,
         ])
-        .from_block(next.from.num)
-        .to_block(next.to.num);
+        .select(next.from.num..next.to.num);
     let mut logs = config
         .eth
         .get_logs(&filter)
