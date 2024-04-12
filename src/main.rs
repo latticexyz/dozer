@@ -75,8 +75,8 @@ async fn main() -> eyre::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_level(false)
         .with_target(false)
-        .without_time()
         .with_max_level(tracing::Level::INFO)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
@@ -138,9 +138,16 @@ async fn main() -> eyre::Result<()> {
     );
     tokio::spawn(async move {
         loop {
-            if let Err(e) = index(&config).await {
-                tracing::error!(%e, "An error occurred: {:?}", e);
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            match index(&config).await {
+                Ok(_) => {}
+                Err(IndexError::Fatal(e)) => {
+                    tracing::error!(%e, "An error occurred: {:?}", e);
+                    return;
+                }
+                Err(IndexError::Retry(e)) => {
+                    tracing::debug!("indexer retry: {:?}", e.to_string());
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
     });
@@ -248,8 +255,8 @@ async fn init_blocks(config: &Config) -> eyre::Result<()> {
         values ($1, $2) on conflict(num) do nothing
         ",
         &[
-            &U64::from(block.header.number.unwrap()),
-            &block.header.hash.unwrap(),
+            &U64::from(block.header.number.expect("missing header number")),
+            &block.header.hash.unwrap_or_default(),
         ],
     )
     .await
@@ -270,64 +277,116 @@ async fn local_latest(config: &Config) -> eyre::Result<(u64, BlockHash)> {
     Ok((n.unwrap().to(), h))
 }
 
-async fn index(config: &Config) -> eyre::Result<()> {
-    loop {
-        let remote_num = config.eth.get_block_number().await.unwrap();
-        let (local_num, _) = local_latest(config).await?;
-        if local_num >= remote_num {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            continue;
-        }
-        let delta = cmp::min(remote_num - local_num, 10000);
-        let (from, to) = (local_num + 1, local_num + delta);
-        tracing::info!(
-            remote = remote_num,
-            local = local_num,
-            from = from,
-            to = to,
-            "get_logs"
-        );
+enum IndexError {
+    Retry(eyre::Report),
+    Fatal(eyre::Report),
+}
 
-        let filter = Filter::new()
-            .events(&[
-                &Store_SetRecord::SIGNATURE,
-                &Store_SpliceDynamicData::SIGNATURE,
-                &Store_SpliceStaticData::SIGNATURE,
-                &Store_DeleteRecord::SIGNATURE,
-            ])
-            .from_block(from)
-            .to_block(to);
-        let mut logs = config
-            .eth
-            .get_logs(&filter)
-            .await
-            .wrap_err("downloading logs")?;
-        logs.sort_by_key(|l| (l.block_number, l.log_index));
-
-        let to_hash = config
-            .eth
-            .get_block_by_number(BlockNumberOrTag::Number(to), false)
-            .await
-            .wrap_err("unable to get 'to' block")?
-            .ok_or_else(|| eyre!("no block was returned for {}", to))?
-            .header
-            .hash;
-        let mut conn = config.pool.get().await.wrap_err("getting db from pool")?;
-        let tx = conn.transaction().await.wrap_err("opening index tx")?;
-        process_logs(&tx, logs).await.wrap_err("processing logs")?;
-        tx.execute(
-            "insert into blocks(num, hash) values ($1, $2)",
-            &[&U64::from(to), &to_hash],
-        )
-        .await
-        .wrap_err(format!("updating blocks table to latest {}", to))?;
-        tx.commit().await.wrap_err("unable to commit tx")?;
+impl From<eyre::Report> for IndexError {
+    fn from(err: eyre::Report) -> Self {
+        IndexError::Fatal(err)
     }
 }
 
-#[tracing::instrument(skip_all)]
+struct NumHash {
+    num: u64,
+    hash: FixedBytes<32>,
+}
+
+struct NextRange {
+    from: NumHash,
+    to: NumHash,
+}
+
+async fn get_block(
+    config: &Config,
+    i: BlockNumberOrTag,
+) -> eyre::Result<rpc::types::eth::Block, IndexError> {
+    config
+        .eth
+        .get_block_by_number(i, false)
+        .await
+        .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?
+        .ok_or(IndexError::Retry(eyre!("no block found")))
+}
+
+#[tracing::instrument(fields(local, remote) skip_all)]
+async fn next_to_index(config: &Config) -> eyre::Result<NextRange, IndexError> {
+    let latest_remote = get_block(config, BlockNumberOrTag::Latest).await?;
+    let remote_num = latest_remote.header.number.unwrap();
+    let (local_num, _) = local_latest(config)
+        .await
+        .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?;
+
+    tracing::Span::current()
+        .record("remote", remote_num)
+        .record("local", local_num);
+
+    if local_num >= remote_num {
+        return Err(IndexError::Retry(eyre!(
+            "nothing new remote={} local={}",
+            remote_num,
+            local_num,
+        )));
+    }
+    let delta = cmp::min(remote_num - local_num, 10000);
+    let (from_num, to_num) = (local_num + 1, cmp::min(local_num + delta, remote_num));
+    let (from, to) = (
+        get_block(config, BlockNumberOrTag::Number(from_num)).await?,
+        get_block(config, BlockNumberOrTag::Number(to_num)).await?,
+    );
+    Ok(NextRange {
+        from: NumHash {
+            num: from.header.number.unwrap(),
+            hash: from.header.hash.unwrap(),
+        },
+        to: NumHash {
+            num: to.header.number.unwrap(),
+            hash: to.header.hash.unwrap(),
+        },
+    })
+}
+
+#[tracing::instrument(fields(from, to, n) skip_all)]
+async fn index(config: &Config) -> eyre::Result<(), IndexError> {
+    let next = next_to_index(config).await?;
+    let filter = Filter::new()
+        .events(&[
+            &Store_SetRecord::SIGNATURE,
+            &Store_SpliceDynamicData::SIGNATURE,
+            &Store_SpliceStaticData::SIGNATURE,
+            &Store_DeleteRecord::SIGNATURE,
+        ])
+        .from_block(next.from.num)
+        .to_block(next.to.num);
+    let mut logs = config
+        .eth
+        .get_logs(&filter)
+        .await
+        .wrap_err("getting logs")?;
+    logs.sort_by_key(|l| (l.block_number, l.log_index));
+
+    tracing::Span::current()
+        .record("from", next.from.num)
+        .record("to", next.to.num)
+        .record("n", logs.len());
+
+    let mut conn = config.pool.get().await.wrap_err("getting db from pool")?;
+    let tx = conn.transaction().await.wrap_err("opening index tx")?;
+    process_logs(&tx, logs).await.wrap_err("processing logs")?;
+    tx.execute(
+        "insert into blocks(num, hash) values ($1, $2)",
+        &[&U64::from(next.to.num), &next.to.hash],
+    )
+    .await
+    .wrap_err(format!("updating blocks table to latest {}", next.to.num))?;
+    tx.commit().await.wrap_err("unable to commit tx")?;
+    Ok(())
+}
+
+#[tracing::instrument(fields(n) skip_all)]
 async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> eyre::Result<()> {
-    tracing::info!(n = logs.len(), "process_logs");
+    tracing::Span::current().record("n", logs.len());
     for log in logs {
         let (block_num, log_idx) = (
             log.block_number.wrap_err("missing block num from log")?,
@@ -365,6 +424,7 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> 
     Ok(())
 }
 
+#[tracing::instrument(level="debug" skip_all)]
 async fn set_record(
     tx: &Transaction<'_>,
     block_num: u64,
@@ -391,6 +451,7 @@ async fn set_record(
     .wrap_err("inserting record")
 }
 
+#[tracing::instrument(level="debug" skip_all)]
 async fn expire_record(
     tx: &Transaction<'_>,
     block_num: u64,
@@ -421,6 +482,7 @@ async fn expire_record(
     .wrap_err("expiring record")
 }
 
+#[tracing::instrument(level="debug" skip_all)]
 async fn splice_static(
     tx: &Transaction<'_>,
     record: &Store_SpliceStaticData,
@@ -464,7 +526,7 @@ async fn splice_static(
     })
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(level="debug" skip_all)]
 async fn splice_dynamic(
     tx: &Transaction<'_>,
     record: &Store_SpliceDynamicData,

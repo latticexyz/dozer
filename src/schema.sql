@@ -5,7 +5,7 @@ create table if not exists records(
     table_id bytea,
     key bytea[],
     static_data bytea,
-    enoded_lengths bytea,
+    encoded_lengths bytea,
     dynamic_data bytea,
     block_num numeric,
     log_idx numeric,

@@ -3,11 +3,11 @@ x review & document data model / expiry
 x http error handler
 x index all of holesky chain and spot check on render db
 x create index for records(table_id, key)
+x figure out tracing. possibly use minitrace
 - add api specs to readme
+- add point-in-time records query
 - return correct data for the records api
 - validate incoming chain data from rpc
-- add point-in-time records query
-- figure out tracing. possibly use minitrace
 - perf test on large response sizes
 - find a good response compression strategy
 - control reset start point from flags
