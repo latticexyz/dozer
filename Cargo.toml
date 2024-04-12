@@ -5,7 +5,7 @@
 
 [dependencies]
 
-    alloy = { git = "https://github.com/alloy-rs/alloy", rev = "bfd0fda", features = [
+    alloy = { git = "https://github.com/alloy-rs/alloy", rev = "25916cd", features = [
         "contract",
         "network",
         "postgres",

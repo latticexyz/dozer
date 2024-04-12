@@ -90,7 +90,7 @@ async fn main() -> eyre::Result<()> {
     );
     let pg_pool = Pool::builder(pg_mgr).max_size(16).build()?;
     let eth_client = ProviderBuilder::new()
-        .on_reqwest_http(
+        .on_http(
             "https://rpc.holesky.redstone.xyz"
                 .parse()
                 .expect("unable to parse rpc url"),
@@ -247,7 +247,10 @@ async fn init_blocks(config: &Config) -> eyre::Result<()> {
         insert into blocks(num, hash)
         values ($1, $2) on conflict(num) do nothing
         ",
-        &[&block.header.number, &block.header.hash.unwrap_or_default()],
+        &[
+            &U64::from(block.header.number.unwrap()),
+            &block.header.hash.unwrap(),
+        ],
     )
     .await
     .map(|_| ())
