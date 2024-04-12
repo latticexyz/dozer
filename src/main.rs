@@ -393,9 +393,9 @@ async fn index(config: &Config) -> eyre::Result<(), IndexError> {
     Ok(())
 }
 
-#[tracing::instrument(fields(n) skip_all)]
+#[tracing::instrument(fields(n, skipped) skip_all)]
 async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> eyre::Result<()> {
-    tracing::Span::current().record("n", logs.len());
+    let (mut skipped, n) = (0, logs.len());
     for log in logs {
         let (block_num, log_idx) = (
             log.block_number.wrap_err("missing block num from log")?,
@@ -427,9 +427,12 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> 
                     .wrap_err("decoding delete record")?;
                 expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, true).await?
             }
-            _ => {}
+            _ => skipped += 1,
         }
     }
+    tracing::Span::current()
+        .record("n", n)
+        .record("skipped", skipped);
     Ok(())
 }
 
