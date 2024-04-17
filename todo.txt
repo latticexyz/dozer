@@ -4,15 +4,15 @@ x http error handler
 x index all of holesky chain and spot check on render db
 x create index for records(table_id, key)
 x figure out tracing. possibly use minitrace
+x return correct data for the records api
+x detect reorg and undo
+- validate incoming chain data from rpc
 - add api specs to readme
 - add point-in-time records query
-- return correct data for the records api
-- validate incoming chain data from rpc
 - perf test on large response sizes
 - find a good response compression strategy
 - control reset start point from flags
 - advisory lock for ensuring 1 indexer
-- detect reorg and undo
 - review potential for batching rpc / pg ops
 - http server timeouts
 - rpc client timeouts

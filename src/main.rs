@@ -1,13 +1,11 @@
 use alloy::{
     primitives::{BlockHash, Bytes, FixedBytes},
     providers::{Provider, ProviderBuilder, ReqwestProvider},
-    rpc::{
-        self,
-        types::eth::{BlockNumberOrTag, Filter},
-    },
+    rpc::types::eth::{Block, BlockNumberOrTag, Filter, Log},
     sol,
     sol_types::SolEvent,
 };
+use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{MatchedPath, State},
@@ -70,6 +68,21 @@ struct Config {
     eth: ReqwestProvider,
 }
 
+fn pg(cstr: &str) -> Pool {
+    let pg_config = tokio_postgres::Config::from_str(cstr).expect("unable to parse database url");
+    let pg_mgr = Manager::from_config(
+        pg_config,
+        NoTls,
+        ManagerConfig {
+            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+        },
+    );
+    Pool::builder(pg_mgr)
+        .max_size(16)
+        .build()
+        .expect("unable to build new pool")
+}
+
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     let subscriber = FmtSubscriber::builder()
@@ -80,15 +93,7 @@ async fn main() -> eyre::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let pg_config = tokio_postgres::Config::from_str("postgres://localhost/imud")?;
-    let pg_mgr = Manager::from_config(
-        pg_config,
-        NoTls,
-        ManagerConfig {
-            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-        },
-    );
-    let pg_pool = Pool::builder(pg_mgr).max_size(16).build()?;
+    let pg_pool = pg("postgres://localhost/imud");
     let eth_client = ProviderBuilder::new()
         .on_http(
             "https://rpc.holesky.redstone.xyz"
@@ -142,7 +147,7 @@ async fn main() -> eyre::Result<()> {
                 Ok(_) => {}
                 Err(IndexError::Fatal(e)) => {
                     tracing::error!(%e, "An error occurred: {:?}", e);
-                    return;
+                    std::process::exit(1);
                 }
                 Err(IndexError::Retry(e)) => {
                     tracing::debug!("indexer retry: {:?}", e.to_string());
@@ -204,7 +209,7 @@ struct GetRecsReq {
     key: Vec<FixedBytes<32>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 struct GetRecsResp {
     block_num: U64,
     log_idx: U64,
@@ -250,6 +255,34 @@ async fn get_records(
     ))
 }
 
+#[derive(Debug)]
+enum IndexError {
+    Retry(eyre::Report),
+    Fatal(eyre::Report),
+}
+
+impl From<eyre::Report> for IndexError {
+    fn from(err: eyre::Report) -> Self {
+        IndexError::Fatal(err)
+    }
+}
+
+impl From<tokio_postgres::Error> for IndexError {
+    fn from(err: tokio_postgres::Error) -> Self {
+        IndexError::Fatal(eyre!("database-error={}", err.to_string()))
+    }
+}
+
+struct NumHash {
+    num: u64,
+    hash: FixedBytes<32>,
+}
+
+struct NextRange {
+    from: NumHash,
+    to: NumHash,
+}
+
 async fn init_blocks(config: &Config) -> eyre::Result<()> {
     let block = config
         .eth
@@ -273,92 +306,120 @@ async fn init_blocks(config: &Config) -> eyre::Result<()> {
     .wrap_err("uanble to load inital block")
 }
 
-async fn local_latest(config: &Config) -> eyre::Result<(u64, BlockHash)> {
-    let conn = config.pool.get().await.unwrap();
-    let row = conn
-        .query_one(
-            "SELECT num, hash from blocks order by num desc limit 1",
-            &[],
-        )
-        .await?;
-    let n: Option<U64> = row.get(0);
-    let h: BlockHash = row.get(1);
-    Ok((n.unwrap().to(), h))
+async fn get_local_latest(tx: &Transaction<'_>) -> eyre::Result<(U64, BlockHash)> {
+    let q = "SELECT num, hash from blocks order by num desc limit 1";
+    let row = tx.query_one(q, &[]).await?;
+    Ok((row.try_get("num")?, row.try_get("hash")?))
 }
 
-enum IndexError {
-    Retry(eyre::Report),
-    Fatal(eyre::Report),
+#[async_trait]
+trait Node {
+    async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError>;
+    async fn logs(&self, filter: Filter) -> eyre::Result<Vec<Log>, IndexError>;
 }
 
-impl From<eyre::Report> for IndexError {
-    fn from(err: eyre::Report) -> Self {
-        IndexError::Fatal(err)
+#[async_trait]
+impl Node for ReqwestProvider {
+    async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError> {
+        self.get_block_by_number(n, false)
+            .await
+            .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?
+            .ok_or(IndexError::Retry(eyre!("no block found")))
+    }
+    async fn logs(&self, _: Filter) -> eyre::Result<Vec<Log>, IndexError> {
+        todo!()
     }
 }
 
-struct NumHash {
-    num: u64,
-    hash: FixedBytes<32>,
-}
+#[tracing::instrument(fields(local, remote, removed) skip_all)]
+async fn next_to_index<F: Node>(
+    pgtx: &Transaction<'_>,
+    remote: &F,
+    max_reorg: u64,
+) -> eyre::Result<NextRange, IndexError> {
+    let mut removed = 0;
+    for _ in 0..max_reorg {
+        let latest_remote = remote.block(BlockNumberOrTag::Latest).await?;
+        let remote_num = latest_remote.header.number.unwrap();
+        let (local_num, local_hash) = get_local_latest(&pgtx)
+            .await
+            .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?;
+        let local_num: u64 = local_num.to();
 
-struct NextRange {
-    from: NumHash,
-    to: NumHash,
-}
+        tracing::Span::current()
+            .record("remote", remote_num)
+            .record("local", local_num);
 
-async fn get_block(
-    config: &Config,
-    i: BlockNumberOrTag,
-) -> eyre::Result<rpc::types::eth::Block, IndexError> {
-    config
-        .eth
-        .get_block_by_number(i, false)
-        .await
-        .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?
-        .ok_or(IndexError::Retry(eyre!("no block found")))
-}
-
-#[tracing::instrument(fields(local, remote) skip_all)]
-async fn next_to_index(config: &Config) -> eyre::Result<NextRange, IndexError> {
-    let latest_remote = get_block(config, BlockNumberOrTag::Latest).await?;
-    let remote_num = latest_remote.header.number.unwrap();
-    let (local_num, _) = local_latest(config)
-        .await
-        .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?;
-
-    tracing::Span::current()
-        .record("remote", remote_num)
-        .record("local", local_num);
-
-    if local_num >= remote_num {
-        return Err(IndexError::Retry(eyre!(
-            "nothing new remote={} local={}",
-            remote_num,
-            local_num,
-        )));
+        if local_num >= remote_num {
+            return Err(IndexError::Retry(eyre!(
+                "nothing new remote={} local={}",
+                remote_num,
+                local_num,
+            )));
+        }
+        let delta = cmp::min(remote_num - local_num, 10000);
+        let (from, to) = (
+            remote
+                .block(BlockNumberOrTag::Number(local_num + 1))
+                .await?,
+            remote
+                .block(BlockNumberOrTag::Number(cmp::min(
+                    local_num + delta,
+                    remote_num,
+                )))
+                .await?,
+        );
+        if from.header.parent_hash != local_hash {
+            tracing::error!(
+                "reorg remote={}/{} local={}/{}",
+                from.header.hash.unwrap(),
+                from.header.number.unwrap(),
+                local_num,
+                local_hash
+            );
+            pgtx.execute(
+                "delete from blocks where num >= $1",
+                &[&U64::from(local_num)],
+            )
+            .await?;
+            pgtx.execute(
+                "delete from records where block_num >= $1",
+                &[&U64::from(local_num)],
+            )
+            .await?;
+            pgtx.execute(
+                "
+                update records set expired_block_num = NULL, expired_log_idx = NULL
+                where expired_block_num >= $1
+                ",
+                &[&U64::from(local_num)],
+            )
+            .await?;
+            removed += 1;
+            continue;
+        }
+        tracing::Span::current().record("removed", removed);
+        return Ok(NextRange {
+            from: NumHash {
+                num: from.header.number.unwrap(),
+                hash: from.header.hash.unwrap(),
+            },
+            to: NumHash {
+                num: to.header.number.unwrap(),
+                hash: to.header.hash.unwrap(),
+            },
+        });
     }
-    let delta = cmp::min(remote_num - local_num, 10000);
-    let (from_num, to_num) = (local_num + 1, cmp::min(local_num + delta, remote_num));
-    let (from, to) = (
-        get_block(config, BlockNumberOrTag::Number(from_num)).await?,
-        get_block(config, BlockNumberOrTag::Number(to_num)).await?,
-    );
-    Ok(NextRange {
-        from: NumHash {
-            num: from.header.number.unwrap(),
-            hash: from.header.hash.unwrap(),
-        },
-        to: NumHash {
-            num: to.header.number.unwrap(),
-            hash: to.header.hash.unwrap(),
-        },
-    })
+    return Err(IndexError::Fatal(eyre!("reorg too big")));
 }
 
 #[tracing::instrument(fields(from, to, n) skip_all)]
 async fn index(config: &Config) -> eyre::Result<(), IndexError> {
-    let next = next_to_index(config).await?;
+    let mut conn = config.pool.get().await.wrap_err("getting db from pool")?;
+    let pgtx = conn.transaction().await.wrap_err("opening index tx")?;
+    let next = next_to_index(&pgtx, &config.eth, 100).await?;
+    pgtx.commit().await.wrap_err("unable to commit tx")?;
+
     let filter = Filter::new()
         .events(&[
             &Store_SetRecord::SIGNATURE,
@@ -393,7 +454,7 @@ async fn index(config: &Config) -> eyre::Result<(), IndexError> {
 }
 
 #[tracing::instrument(fields(n, skipped) skip_all)]
-async fn process_logs(tx: &Transaction<'_>, logs: Vec<rpc::types::eth::Log>) -> eyre::Result<()> {
+async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> {
     let (mut skipped, n) = (0, logs.len());
     for log in logs {
         let (block_num, log_idx) = (
@@ -594,6 +655,134 @@ fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: &Bytes) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    static LOGGING_INIT: Once = Once::new();
+
+    fn logging() {
+        LOGGING_INIT.call_once(|| {
+            let subscriber = FmtSubscriber::builder()
+                .with_max_level(tracing::Level::DEBUG)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("setting default subscriber failed");
+        });
+    }
+
+    async fn reset(pool: &Pool) {
+        let conn = pool.get().await.expect("getting conn");
+        conn.batch_execute(&format!(
+            "drop schema public cascade; create schema public; {}",
+            SCHEMA
+        ))
+        .await
+        .expect("resetting schema");
+    }
+
+    fn test_block(num: u64, hash: u8, parent: u8) -> Block {
+        let mut block = Block::default();
+        block.header.number = Some(num);
+        block.header.hash = Some(FixedBytes::with_last_byte(hash));
+        block.header.parent_hash = FixedBytes::with_last_byte(parent);
+        block
+    }
+
+    struct TestGetRemote(Block);
+
+    #[async_trait]
+    impl Node for TestGetRemote {
+        async fn logs(&self, _: Filter) -> eyre::Result<Vec<Log>, IndexError> {
+            todo!()
+        }
+        async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError> {
+            match n {
+                BlockNumberOrTag::Number(n) => Ok(test_block(n, n as u8, (n - 1) as u8)),
+                BlockNumberOrTag::Latest => Ok(self.0.clone()),
+                _ => panic!("ah"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_next_to_index() {
+        logging();
+        let pgpool = pg("postgres://localhost/imud-test");
+        reset(&pgpool).await;
+        let mut conn = pgpool.get().await.expect("getting conn");
+        let pgtx = conn.transaction().await.expect("opening index tx");
+        pgtx.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(0), &FixedBytes::<32>::ZERO],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        let trg = TestGetRemote {
+            0: test_block(10, 10, 9),
+        };
+        let next_range = next_to_index(&pgtx, &trg, 1).await.unwrap();
+        assert_eq!(next_range.from.num, 1);
+        assert_eq!(next_range.to.num, 10);
+    }
+
+    #[tokio::test]
+    async fn test_next_to_index_reorg() {
+        logging();
+        let pgpool = pg("postgres://localhost/imud-test");
+        reset(&pgpool).await;
+        let mut conn = pgpool.get().await.expect("getting conn");
+        let pgtx = conn.transaction().await.expect("opening index tx");
+
+        pgtx.execute(
+            "
+            insert into blocks(num, hash) values ($1, $2), ($3, $4)
+            ",
+            &[
+                &U64::from(0),
+                &FixedBytes::<32>::ZERO,
+                &U64::from(1),
+                &FixedBytes::<32>::with_last_byte(99),
+            ],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        pgtx.execute(
+            r#"
+            insert into records(table_id, key, block_num, log_idx, expired_block_num, expired_log_idx)
+            values ('\x01', '{"\\x01"}', 0, 0, 1, 0), ('\x01', '{"\\x01"}', 1, 0, NULL, NULL)
+            "#,
+            &[],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        let trg = TestGetRemote {
+            0: test_block(2, 2, 1),
+        };
+        next_to_index(&pgtx, &trg, 2).await.unwrap();
+
+        let rows = pgtx
+            .query("select num, hash from blocks order by num desc", &[])
+            .await
+            .expect("test query");
+        let mut got: Vec<(U64, FixedBytes<32>)> = vec![];
+        for row in rows {
+            got.push((row.get("num"), row.get("hash")))
+        }
+        assert_eq!(got, vec![(U64::from(0), FixedBytes::<32>::ZERO)]);
+
+        let rows = pgtx
+            .query("select block_num, expired_block_num from records", &[])
+            .await
+            .expect("querying records table");
+        let mut got: Vec<(U64, Option<U64>)> = vec![];
+        for row in rows {
+            got.push((row.get("block_num"), row.get("expired_block_num")))
+        }
+        assert_eq!(got, vec![(U64::from(0), None)]);
+    }
+
     #[test]
     fn test_splice_add_empty() {
         let mut data = vec![];
