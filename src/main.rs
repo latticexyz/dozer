@@ -313,13 +313,18 @@ async fn get_local_latest(tx: &Transaction<'_>) -> eyre::Result<(U64, BlockHash)
 }
 
 #[async_trait]
-trait Node {
+/// A subset of the ETH RPC API used by this indexer
+/// We use alloy's ReqwestProvider for normal operations
+/// and a Test struct for unit testing. This allows us to easily
+/// simulate good/bad responses.
+trait EthApi {
     async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError>;
     async fn logs(&self, filter: Filter) -> eyre::Result<Vec<Log>, IndexError>;
 }
 
 #[async_trait]
-impl Node for ReqwestProvider {
+/// Wraps the alloy Result type with our internal error types
+impl EthApi for ReqwestProvider {
     async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError> {
         self.get_block_by_number(n, false)
             .await
@@ -327,6 +332,10 @@ impl Node for ReqwestProvider {
             .ok_or(IndexError::Retry(eyre!("no block found")))
     }
 
+    /// In addition to getting the logs from the RPC API
+    /// this function also does a basic validation step to ensure
+    /// that the logs returned from the API are within the requested
+    /// block range.
     async fn logs(&self, f: Filter) -> eyre::Result<Vec<Log>, IndexError> {
         let logs = self
             .get_logs(&f)
@@ -361,7 +370,7 @@ impl Node for ReqwestProvider {
 }
 
 #[tracing::instrument(fields(local, remote, removed) skip_all)]
-async fn next_to_index<F: Node>(
+async fn next_to_index<F: EthApi>(
     pgtx: &Transaction<'_>,
     remote: &F,
     max_reorg: u64,
@@ -443,7 +452,7 @@ async fn next_to_index<F: Node>(
 }
 
 #[tracing::instrument(fields(from, to, n) skip_all)]
-async fn index<T: Node>(remote: &T, pgpool: &Pool) -> eyre::Result<(), IndexError> {
+async fn index<T: EthApi>(remote: &T, pgpool: &Pool) -> eyre::Result<(), IndexError> {
     let mut conn = pgpool.get().await.wrap_err("getting db from pool")?;
     let pgtx = conn.transaction().await.wrap_err("opening index tx")?;
     let next = next_to_index(&pgtx, remote, 100).await?;
@@ -715,7 +724,7 @@ mod tests {
     struct TestGetRemote(Block);
 
     #[async_trait]
-    impl Node for TestGetRemote {
+    impl EthApi for TestGetRemote {
         async fn logs(&self, _: Filter) -> eyre::Result<Vec<Log>, IndexError> {
             todo!()
         }
