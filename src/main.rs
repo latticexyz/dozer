@@ -143,7 +143,7 @@ async fn main() -> eyre::Result<()> {
     );
     tokio::spawn(async move {
         loop {
-            match index(&config).await {
+            match index(&config.eth, &config.pool).await {
                 Ok(_) => {}
                 Err(IndexError::Fatal(e)) => {
                     tracing::error!(%e, "An error occurred: {:?}", e);
@@ -326,8 +326,37 @@ impl Node for ReqwestProvider {
             .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?
             .ok_or(IndexError::Retry(eyre!("no block found")))
     }
-    async fn logs(&self, _: Filter) -> eyre::Result<Vec<Log>, IndexError> {
-        todo!()
+
+    async fn logs(&self, f: Filter) -> eyre::Result<Vec<Log>, IndexError> {
+        let logs = self
+            .get_logs(&f)
+            .await
+            .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?;
+        // It's not uncommon for RPC API providers to respond to
+        // log requests with data that is unrleated to the requested block range
+        for log in &logs {
+            if let Some(n) = log.block_number {
+                if let Some(BlockNumberOrTag::Number(m)) = f.block_option.get_from_block() {
+                    if n < *m {
+                        return Err(IndexError::Fatal(eyre!(
+                            "log contains data for block={} but filter.from={}",
+                            n,
+                            m
+                        )));
+                    }
+                }
+                if let Some(BlockNumberOrTag::Number(m)) = f.block_option.get_to_block() {
+                    if n > *m {
+                        return Err(IndexError::Fatal(eyre!(
+                            "log contains data for block={} but filter.to={}",
+                            n,
+                            m
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(logs)
     }
 }
 
@@ -414,10 +443,10 @@ async fn next_to_index<F: Node>(
 }
 
 #[tracing::instrument(fields(from, to, n) skip_all)]
-async fn index(config: &Config) -> eyre::Result<(), IndexError> {
-    let mut conn = config.pool.get().await.wrap_err("getting db from pool")?;
+async fn index<T: Node>(remote: &T, pgpool: &Pool) -> eyre::Result<(), IndexError> {
+    let mut conn = pgpool.get().await.wrap_err("getting db from pool")?;
     let pgtx = conn.transaction().await.wrap_err("opening index tx")?;
-    let next = next_to_index(&pgtx, &config.eth, 100).await?;
+    let next = next_to_index(&pgtx, remote, 100).await?;
     pgtx.commit().await.wrap_err("unable to commit tx")?;
 
     let filter = Filter::new()
@@ -428,11 +457,7 @@ async fn index(config: &Config) -> eyre::Result<(), IndexError> {
             &Store_DeleteRecord::SIGNATURE,
         ])
         .select(next.from.num..next.to.num);
-    let mut logs = config
-        .eth
-        .get_logs(&filter)
-        .await
-        .wrap_err("getting logs")?;
+    let mut logs = remote.logs(filter).await?;
     logs.sort_by_key(|l| (l.block_number, l.log_index));
 
     tracing::Span::current()
@@ -440,7 +465,7 @@ async fn index(config: &Config) -> eyre::Result<(), IndexError> {
         .record("to", next.to.num)
         .record("n", logs.len());
 
-    let mut conn = config.pool.get().await.wrap_err("getting db from pool")?;
+    let mut conn = pgpool.get().await.wrap_err("getting db from pool")?;
     let tx = conn.transaction().await.wrap_err("opening index tx")?;
     process_logs(&tx, logs).await.wrap_err("processing logs")?;
     tx.execute(
