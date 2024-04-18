@@ -8,13 +8,13 @@ x return correct data for the records api
 x detect reorg and undo
 x validate incoming chain data from rpc
 x find a good response compression strategy
+x http server timeouts
 - add api specs to readme
 - add point-in-time records query
 - perf test on large response sizes
 - control reset start point from flags
 - advisory lock for ensuring 1 indexer
 - review potential for batching rpc / pg ops
-- http server timeouts
 - rpc client timeouts
 - pg query timeout
 - http rate limiter

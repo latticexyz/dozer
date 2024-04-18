@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::{cmp, str::FromStr, time::Duration};
 use tokio;
 use tokio_postgres::{NoTls, Row, Transaction};
-use tower_http::{compression::CompressionLayer, trace::TraceLayer};
+use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing;
 use tracing_subscriber::FmtSubscriber;
 
@@ -118,6 +118,7 @@ async fn main() -> eyre::Result<()> {
             .route("/records", post(get_records))
             .with_state(config.clone())
             .layer(CompressionLayer::new())
+            .layer(TimeoutLayer::new(Duration::from_secs(10)))
             .layer(
                 TraceLayer::new_for_http()
                     .make_span_with(|request: &axum::http::Request<_>| {

@@ -1,5 +1,6 @@
 set -ex
 curl http://localhost:3000/records \
+	-i \
 	-w '\n\nnbytes=%{size_download}\n' \
 	--compressed \
 	-H 'Accept-Encoding: gzip' \
