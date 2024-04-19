@@ -1,4 +1,8 @@
+mod checksql;
+use checksql::{unknown_function, unknown_table};
+
 use alloy::{
+    hex::{self, ToHexExt},
     primitives::{BlockHash, Bytes, FixedBytes},
     providers::{Provider, ProviderBuilder, ReqwestProvider},
     rpc::types::eth::{Block, BlockNumberOrTag, Filter, Log},
@@ -13,13 +17,19 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use bytes;
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::{eyre, ContextCompat, WrapErr};
-use ruint::aliases::U64;
+use futures_util::{pin_mut, TryStreamExt};
+use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{cmp, str::FromStr, time::Duration};
 use tokio;
-use tokio_postgres::{NoTls, Row, Transaction};
+use tokio_postgres::{
+    types::{IsNull, ToSql, Type},
+    Client, NoTls, Transaction,
+};
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing;
 use tracing_subscriber::FmtSubscriber;
@@ -65,11 +75,12 @@ static SCHEMA: &'static str = include_str!("./schema.sql");
 #[derive(Clone, Debug)]
 struct Config {
     pool: Pool,
-    eth: ReqwestProvider,
 }
 
-fn pg(cstr: &str) -> Pool {
-    let pg_config = tokio_postgres::Config::from_str(cstr).expect("unable to parse database url");
+fn api_ro_pg(cstr: &str) -> Pool {
+    let mut pg_config =
+        tokio_postgres::Config::from_str(cstr).expect("unable to parse database url");
+    pg_config.user("uapi");
     let pg_mgr = Manager::from_config(
         pg_config,
         NoTls,
@@ -93,7 +104,13 @@ async fn main() -> eyre::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let pg_pool = pg("postgres://localhost/imud");
+    let (mut w_pg, w_conn) =
+        tokio_postgres::connect("host=localhost user=postgres dbname=imud", NoTls).await?;
+    tokio::spawn(async move {
+        if let Err(e) = w_conn.await {
+            panic!("database writer error: {}", e)
+        }
+    });
     let eth_client = ProviderBuilder::new()
         .on_http(
             "https://rpc.holesky.redstone.xyz"
@@ -101,21 +118,19 @@ async fn main() -> eyre::Result<()> {
                 .expect("unable to parse rpc url"),
         )
         .expect("unable to build eth client");
+    {
+        w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
+        init_blocks(&mut w_pg, &eth_client).await?;
+    }
 
     let config = Config {
-        pool: pg_pool,
-        eth: eth_client,
+        pool: api_ro_pg("postgres://localhost/imud"),
     };
 
-    {
-        let conn = config.pool.get().await.wrap_err("getting pg connection")?;
-        conn.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
-        init_blocks(&config).await?
-    }
     let (app, listener) = (
         Router::new()
             .route("/", get(|| async { "hello\n" }))
-            .route("/records", post(get_records))
+            .route("/q", post(get_records))
             .with_state(config.clone())
             .layer(CompressionLayer::new())
             .layer(TimeoutLayer::new(Duration::from_secs(10)))
@@ -143,9 +158,10 @@ async fn main() -> eyre::Result<()> {
             .await
             .expect("binding to tcp for http server"),
     );
+
     tokio::spawn(async move {
         loop {
-            match index(&config.eth, &config.pool).await {
+            match index(&eth_client, &mut w_pg).await {
                 Ok(_) => {}
                 Err(IndexError::Fatal(e)) => {
                     tracing::error!(%e, "An error occurred: {:?}", e);
@@ -207,8 +223,8 @@ impl From<eyre::Report> for ApiError {
 
 #[derive(Deserialize)]
 struct GetRecsReq {
-    table_id: FixedBytes<32>,
-    key: Vec<FixedBytes<32>>,
+    query: String,
+    values: Vec<Value>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -220,41 +236,95 @@ struct GetRecsResp {
     dynamic_data: Bytes,
 }
 
-impl GetRecsResp {
-    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
-        Ok(GetRecsResp {
-            block_num: row.try_get("block_num")?,
-            log_idx: row.try_get("log_idx")?,
-            static_data: Bytes::copy_from_slice(row.try_get("static_data")?),
-            encoded_lengths: row.try_get("encoded_lengths")?,
-            dynamic_data: Bytes::copy_from_slice(row.try_get("dynamic_data")?),
-        })
+// TODO: I feel like there is a more concise way of
+// translating a json array of query parameters into
+// a tokio-postgres compatible format. Until then
+// PGValue solved the problem.
+#[derive(Debug)]
+struct PGValue(Value);
+
+impl PGValue {
+    pub fn new(value: Value) -> Self {
+        PGValue(value)
     }
+}
+
+impl ToSql for PGValue {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match &self.0 {
+            Value::Number(i) => <U64 as ToSql>::to_sql(&U64::from(i.as_u64().unwrap()), ty, out),
+            Value::String(s) => <&[u8] as ToSql>::to_sql(&&hex::decode(s).unwrap()[..], ty, out),
+            _ => return Err("must be number or string".into()),
+        }
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(
+            ty,
+            &Type::INT8 | &Type::TEXT | &Type::NUMERIC | &Type::BYTEA
+        )
+    }
+
+    tokio_postgres::types::to_sql_checked!();
 }
 
 async fn get_records(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
-) -> Result<Json<Vec<GetRecsResp>>, ApiError> {
+) -> Result<Json<Vec<Value>>, ApiError> {
+    if unknown_table(&req.query, &vec!["records"])? {
+        return Err(ApiError::User(
+            StatusCode::BAD_REQUEST,
+            String::from("unknown table"),
+        ));
+    }
+    if unknown_function(&req.query, &vec!["count", "b2i8"])? {
+        return Err(ApiError::User(
+            StatusCode::BAD_REQUEST,
+            String::from("unknown function"),
+        ));
+    }
     let conn = state.pool.get().await.wrap_err("getting conn from pool")?;
-    let rows = conn
-        .query(
-            "
-            select block_num, log_idx, static_data, encoded_lengths, dynamic_data
-            from records
-            where table_id = $1
-            and key = $2
-            and expired_block_num is null
-            ",
-            &[&req.table_id, &req.key],
-        )
+    let args = req.values.iter().map(|v| PGValue::new(v.clone()));
+    // TODO using query_raw in concert with PGValue
+    // to easily pass the query's parameter's to tokio-postgres.
+    // I would like to find a better way that allows us to use
+    // the standard query api and eliminate the need for PGValue.
+    let it = conn
+        .query_raw(dbg!(&req.query), args)
         .await
         .wrap_err("querying records table")?;
-    Ok(Json(
-        rows.iter()
-            .map(GetRecsResp::from_row)
-            .collect::<Result<Vec<_>, _>>()?,
-    ))
+
+    let mut result: Vec<Value> = Vec::new();
+    pin_mut!(it);
+    while let Some(row) = it.try_next().await? {
+        let mut row_json = serde_json::Map::new();
+        for (idx, column) in row.columns().iter().enumerate() {
+            let key = column.name().to_string();
+            let value = match *column.type_() {
+                Type::NUMERIC => {
+                    let n: U256 = row.get(idx);
+                    Value::String(n.to_string())
+                }
+                Type::INT2 | Type::INT4 | Type::INT8 => {
+                    let n: i64 = row.get(idx);
+                    Value::Number(n.into())
+                }
+                Type::BYTEA => {
+                    let b: &[u8] = row.get(idx);
+                    Value::String(b.encode_hex())
+                }
+                _ => Value::Null,
+            };
+            row_json.insert(key, value);
+        }
+        result.push(Value::Object(row_json))
+    }
+    Ok(Json(result))
 }
 
 #[derive(Debug)]
@@ -285,15 +355,12 @@ struct NextRange {
     to: NumHash,
 }
 
-async fn init_blocks(config: &Config) -> eyre::Result<()> {
-    let block = config
-        .eth
-        .get_block_by_number(BlockNumberOrTag::Number(0), false)
-        .await?
-        .expect("unable to find latest block");
-
-    let conn = config.pool.get().await.unwrap();
-    conn.execute(
+async fn init_blocks<F: EthApi>(pg: &mut Client, remote: &F) -> eyre::Result<()> {
+    let block = remote
+        .block(BlockNumberOrTag::Number(0))
+        .await
+        .map_err(|e| eyre!("getting block: {:?}", e))?;
+    pg.execute(
         "
         insert into blocks(num, hash)
         values ($1, $2) on conflict(num) do nothing
@@ -305,7 +372,7 @@ async fn init_blocks(config: &Config) -> eyre::Result<()> {
     )
     .await
     .map(|_| ())
-    .wrap_err("uanble to load inital block")
+    .wrap_err("unable to init blocks table")
 }
 
 async fn get_local_latest(tx: &Transaction<'_>) -> eyre::Result<(U64, BlockHash)> {
@@ -344,7 +411,7 @@ impl EthApi for ReqwestProvider {
             .await
             .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?;
         // It's not uncommon for RPC API providers to respond to
-        // log requests with data that is unrleated to the requested block range
+        // log requests with data that is unrelated to the requested block range
         for log in &logs {
             if let Some(n) = log.block_number {
                 if let Some(BlockNumberOrTag::Number(m)) = f.block_option.get_from_block() {
@@ -454,9 +521,8 @@ async fn next_to_index<F: EthApi>(
 }
 
 #[tracing::instrument(fields(from, to, n) skip_all)]
-async fn index<T: EthApi>(remote: &T, pgpool: &Pool) -> eyre::Result<(), IndexError> {
-    let mut conn = pgpool.get().await.wrap_err("getting db from pool")?;
-    let pgtx = conn.transaction().await.wrap_err("opening index tx")?;
+async fn index<T: EthApi>(remote: &T, pg: &mut Client) -> eyre::Result<(), IndexError> {
+    let pgtx = pg.transaction().await.wrap_err("opening index tx")?;
     let next = next_to_index(&pgtx, remote, 100).await?;
     pgtx.commit().await.wrap_err("unable to commit tx")?;
 
@@ -476,8 +542,7 @@ async fn index<T: EthApi>(remote: &T, pgpool: &Pool) -> eyre::Result<(), IndexEr
         .record("to", next.to.num)
         .record("n", logs.len());
 
-    let mut conn = pgpool.get().await.wrap_err("getting db from pool")?;
-    let tx = conn.transaction().await.wrap_err("opening index tx")?;
+    let tx = pg.transaction().await.wrap_err("opening index tx")?;
     process_logs(&tx, logs).await.wrap_err("processing logs")?;
     tx.execute(
         "insert into blocks(num, hash) values ($1, $2)",
@@ -690,6 +755,8 @@ fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: &Bytes) {
 
 #[cfg(test)]
 mod tests {
+    use pgtemp::PgTempDB;
+
     use super::*;
     use std::sync::Once;
 
@@ -705,14 +772,16 @@ mod tests {
         });
     }
 
-    async fn reset(pool: &Pool) {
-        let conn = pool.get().await.expect("getting conn");
-        conn.batch_execute(&format!(
-            "drop schema public cascade; create schema public; {}",
-            SCHEMA
-        ))
-        .await
-        .expect("resetting schema");
+    async fn test_pg(cstr: &str) -> Client {
+        let (client, connection) = tokio_postgres::connect(cstr, NoTls)
+            .await
+            .expect("unable to start test database");
+        tokio::spawn(connection);
+        client
+            .batch_execute(SCHEMA)
+            .await
+            .expect("resetting schema");
+        client
     }
 
     fn test_block(num: u64, hash: u8, parent: u8) -> Block {
@@ -742,10 +811,9 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index() {
         logging();
-        let pgpool = pg("postgres://localhost/imud-test");
-        reset(&pgpool).await;
-        let mut conn = pgpool.get().await.expect("getting conn");
-        let pgtx = conn.transaction().await.expect("opening index tx");
+        let db = &PgTempDB::async_new().await;
+        let mut pg = test_pg(&db.connection_string()).await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
         pgtx.execute(
             "insert into blocks(num, hash) values ($1, $2)",
             &[&U64::from(0), &FixedBytes::<32>::ZERO],
@@ -764,10 +832,9 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index_reorg() {
         logging();
-        let pgpool = pg("postgres://localhost/imud-test");
-        reset(&pgpool).await;
-        let mut conn = pgpool.get().await.expect("getting conn");
-        let pgtx = conn.transaction().await.expect("opening index tx");
+        let db = &PgTempDB::async_new().await;
+        let mut pg = test_pg(&db.connection_string()).await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
 
         pgtx.execute(
             "

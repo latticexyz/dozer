@@ -1,12 +1,9 @@
-set -ex
-curl http://localhost:3000/records \
-	-i \
-	-w '\n\nnbytes=%{size_download}\n' \
+set -e
+curl http://localhost:3000/q \
 	--compressed \
 	-H 'Accept-Encoding: gzip' \
 	-H 'Content-Type: application/json' \
 	-d '{
-	"table_id": "0x74620000000000000000000000000000436861726163746572496e76656e746f",
-	"key": ["0x0000000000000000000000000000000000000000000000000000000000000000"]
+	"query": "select count(*) from records where b2i8(key[1]) > 42",
+	"values": []
 }'
-printf '\n'
