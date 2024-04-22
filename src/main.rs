@@ -241,11 +241,11 @@ async fn get_records(
             String::from("unknown function"),
         ));
     }
-    let mut args2 = Vec::<Box<dyn ToSql + Sync + Send>>::with_capacity(4);
-    for arg in req.values {
-        match arg {
-            Value::Number(i) => args2.push(Box::new(U64::from(i.as_u64().unwrap()))),
-            Value::String(s) => args2.push(Box::new(hex::decode(s).unwrap())),
+    let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
+    for val in req.values {
+        match val {
+            Value::Number(i) => vals.push(Box::new(U64::from(i.as_u64().unwrap()))),
+            Value::String(s) => vals.push(Box::new(hex::decode(s).unwrap())),
             _ => {
                 return Err(ApiError::User(
                     StatusCode::BAD_REQUEST,
@@ -255,12 +255,12 @@ async fn get_records(
         }
     }
     let conn = state.pool.get().await.wrap_err("getting conn from pool")?;
-    let args2 = args2
+    let vals = vals
         .iter()
         .map(|x| x.as_ref() as &(dyn ToSql + Sync))
         .collect::<Vec<_>>();
     let rows = conn
-        .query(dbg!(&req.query), &args2[..])
+        .query(dbg!(&req.query), &vals[..])
         .await
         .wrap_err("querying records table")?;
 
