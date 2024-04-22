@@ -225,15 +225,6 @@ struct GetRecsReq {
     values: Vec<Value>,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
-struct GetRecsResp {
-    block_num: U64,
-    log_idx: U64,
-    static_data: Bytes,
-    encoded_lengths: FixedBytes<32>,
-    dynamic_data: Bytes,
-}
-
 async fn get_records(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
