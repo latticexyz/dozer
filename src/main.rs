@@ -17,17 +17,15 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use bytes;
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::{eyre, ContextCompat, WrapErr};
-use futures_util::{pin_mut, TryStreamExt};
 use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{cmp, str::FromStr, time::Duration};
 use tokio;
 use tokio_postgres::{
-    types::{IsNull, ToSql, Type},
+    types::{ToSql, Type},
     Client, NoTls, Transaction,
 };
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
@@ -236,42 +234,6 @@ struct GetRecsResp {
     dynamic_data: Bytes,
 }
 
-// TODO: I feel like there is a more concise way of
-// translating a json array of query parameters into
-// a tokio-postgres compatible format. Until then
-// PGValue solved the problem.
-#[derive(Debug)]
-struct PGValue(Value);
-
-impl PGValue {
-    pub fn new(value: Value) -> Self {
-        PGValue(value)
-    }
-}
-
-impl ToSql for PGValue {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut bytes::BytesMut,
-    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        match &self.0 {
-            Value::Number(i) => <U64 as ToSql>::to_sql(&U64::from(i.as_u64().unwrap()), ty, out),
-            Value::String(s) => <&[u8] as ToSql>::to_sql(&&hex::decode(s).unwrap()[..], ty, out),
-            _ => return Err("must be number or string".into()),
-        }
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        matches!(
-            ty,
-            &Type::INT8 | &Type::TEXT | &Type::NUMERIC | &Type::BYTEA
-        )
-    }
-
-    tokio_postgres::types::to_sql_checked!();
-}
-
 async fn get_records(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
@@ -288,20 +250,31 @@ async fn get_records(
             String::from("unknown function"),
         ));
     }
+    let mut args2 = Vec::<Box<dyn ToSql + Sync + Send>>::with_capacity(4);
+    for arg in req.values {
+        match arg {
+            Value::Number(i) => args2.push(Box::new(U64::from(i.as_u64().unwrap()))),
+            Value::String(s) => args2.push(Box::new(hex::decode(s).unwrap())),
+            _ => {
+                return Err(ApiError::User(
+                    StatusCode::BAD_REQUEST,
+                    String::from("values must be string or number"),
+                ))
+            }
+        }
+    }
     let conn = state.pool.get().await.wrap_err("getting conn from pool")?;
-    let args = req.values.iter().map(|v| PGValue::new(v.clone()));
-    // TODO using query_raw in concert with PGValue
-    // to easily pass the query's parameter's to tokio-postgres.
-    // I would like to find a better way that allows us to use
-    // the standard query api and eliminate the need for PGValue.
-    let it = conn
-        .query_raw(dbg!(&req.query), args)
+    let args2 = args2
+        .iter()
+        .map(|x| x.as_ref() as &(dyn ToSql + Sync))
+        .collect::<Vec<_>>();
+    let rows = conn
+        .query(dbg!(&req.query), &args2[..])
         .await
         .wrap_err("querying records table")?;
 
     let mut result: Vec<Value> = Vec::new();
-    pin_mut!(it);
-    while let Some(row) = it.try_next().await? {
+    for row in rows {
         let mut row_json = serde_json::Map::new();
         for (idx, column) in row.columns().iter().enumerate() {
             let key = column.name().to_string();

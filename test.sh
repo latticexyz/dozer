@@ -4,6 +4,6 @@ curl http://localhost:3000/q \
 	-H 'Accept-Encoding: gzip' \
 	-H 'Content-Type: application/json' \
 	-d '{
-	"query": "select count(*) from records where b2i8(key[1]) > 42",
+	"query": "select block_num from records order by block_num desc limit 1",
 	"values": []
 }'
