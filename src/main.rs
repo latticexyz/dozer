@@ -3,11 +3,11 @@ use checksql::{unknown_function, unknown_table};
 
 use alloy::{
     hex::{self, ToHexExt},
-    primitives::{BlockHash, Bytes, FixedBytes},
+    primitives::{fixed_bytes, BlockHash, Bytes, FixedBytes},
     providers::{Provider, ProviderBuilder, ReqwestProvider},
     rpc::types::eth::{Block, BlockNumberOrTag, Filter, Log},
     sol,
-    sol_types::SolEvent,
+    sol_types::{SolEvent, SolType},
 };
 use async_trait::async_trait;
 use axum::{
@@ -17,12 +17,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::{eyre, ContextCompat, WrapErr};
 use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{cmp, str::FromStr, time::Duration};
+use std::{borrow::Borrow, cmp, str::FromStr, time::Duration};
 use tokio;
 use tokio_postgres::{
     types::{ToSql, Type},
@@ -454,6 +455,11 @@ async fn next_to_index<F: EthApi>(
             )
             .await?;
             pgtx.execute(
+                "delete from tables where block_num >= $1",
+                &[&U64::from(local_num)],
+            )
+            .await?;
+            pgtx.execute(
                 "delete from records where block_num >= $1",
                 &[&U64::from(local_num)],
             )
@@ -532,6 +538,13 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
                     .wrap_err("decoding set record")?;
                 expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, false).await?;
                 set_record(&tx, log.block_number.unwrap(), log.log_index.unwrap(), &rec).await?;
+
+                const TABLES_TABLE_ID: FixedBytes<32> = fixed_bytes!(
+                    "746273746f72650000000000000000005461626c657300000000000000000000"
+                );
+                if rec.table_id == TABLES_TABLE_ID {
+                    save_schema(tx, block_num, log_idx, &rec).await?
+                }
             }
             &Store_SpliceDynamicData::SIGNATURE_HASH => {
                 let rec = Store_SpliceDynamicData::decode_log_data(log.data(), true)
@@ -559,6 +572,139 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
         .record("n", n)
         .record("skipped", skipped);
     Ok(())
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct DynamicData<'a> {
+    f0: Option<&'a [u8]>,
+    f1: Option<&'a [u8]>,
+    f2: Option<&'a [u8]>,
+    f3: Option<&'a [u8]>,
+    f4: Option<&'a [u8]>,
+}
+
+impl<'a> DynamicData<'a> {
+    fn new(data: &'a [u8], el: FixedBytes<32>) -> eyre::Result<Self> {
+        fn dec(s: &[u8]) -> usize {
+            s.into_iter().fold(0, |n, b| n << 8 | *b as usize)
+        }
+        let l4 = dec(&el[0..5]);
+        let l3 = dec(&el[5..10]);
+        let l2 = dec(&el[10..15]);
+        let l1 = dec(&el[15..20]);
+        let l0 = dec(&el[20..25]);
+        let total = dec(&el[25..32]);
+        if total != l0 + l1 + l2 + l3 + l4 {
+            return Err(eyre!("corrupt dynamic data"));
+        }
+        Ok(DynamicData {
+            f4: data.get(l3..l3 + l4).filter(|&sub| !sub.is_empty()),
+            f3: data.get(l2..l2 + l3).filter(|&sub| !sub.is_empty()),
+            f2: data.get(l1..l1 + l2).filter(|&sub| !sub.is_empty()),
+            f1: data.get(l0..l0 + l1).filter(|&sub| !sub.is_empty()),
+            f0: data.get(0..l0).filter(|&sub| !sub.is_empty()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod dynamic_data_test {
+    use super::DynamicData;
+    use alloy::primitives::fixed_bytes;
+    #[test]
+    fn test_new_error() {
+        let el = fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000020");
+        let dd = &[1u8; 32];
+        let dd = DynamicData::new(dd, el);
+        assert!(dd.is_err());
+    }
+    #[test]
+    fn test_new_empty() {
+        let el = fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
+        let dd = &[0u8];
+        let dd = DynamicData::new(dd, el);
+        assert!(dd.is_ok());
+
+        let dd = dd.unwrap();
+        assert!(dd.f0.is_none());
+        assert!(dd.f1.is_none());
+        assert!(dd.f2.is_none());
+        assert!(dd.f3.is_none());
+        assert!(dd.f4.is_none());
+    }
+    #[test]
+    fn test_new_not_empty() {
+        let el = fixed_bytes!("0000000000000000000000000000000000000000000000002000000000000020");
+        let dd = &[1u8; 32];
+        let dd = DynamicData::new(dd, el);
+        assert!(dd.is_ok());
+
+        let dd = dd.unwrap();
+        assert!(dd.f0.is_some());
+        assert!(dd.f1.is_none());
+        assert!(dd.f2.is_none());
+        assert!(dd.f3.is_none());
+        assert!(dd.f4.is_none());
+
+        assert_eq!(dd.f0.unwrap(), &[1u8; 32])
+    }
+}
+
+#[tracing::instrument(level="debug" skip_all)]
+async fn save_schema(
+    tx: &Transaction<'_>,
+    block_num: u64,
+    log_idx: u64,
+    rec: &Store_SetRecord,
+) -> eyre::Result<()> {
+    let table_id = rec.key_tuple.first().wrap_err("missing table_id")?;
+    let table_name: Vec<u8> = table_id[15..32]
+        .iter()
+        .map(|c| *c)
+        .filter(|c| *c > 0 && *c < 255) //ascii table names
+        .collect();
+    let table_name = String::from_utf8(table_name).unwrap();
+    let key_schema = FixedBytes::<32>::from_slice(
+        rec.static_data
+            .get(32..64)
+            .wrap_err("unable to get key_schema")?,
+    );
+    let val_schema = FixedBytes::<32>::from_slice(
+        rec.static_data
+            .get(64..96)
+            .wrap_err("unable to get val_schema")?,
+    );
+    let ddat = DynamicData::new(rec.dynamic_data.borrow(), rec.encoded_lengths)?;
+    type SolArrayOf<T> = sol! { T[] };
+    let key_names = SolArrayOf::<sol!(string)>::abi_decode(
+        ddat.f0.expect("missing dynamic field for key names"),
+        false,
+    )?;
+    let val_names = SolArrayOf::<sol!(string)>::abi_decode(
+        ddat.f1.expect("missing dynamic field for val names"),
+        false,
+    )?;
+    tracing::info!("new-schema table={:x}/{}", table_id, table_name,);
+    tx.execute(
+        "
+        insert into tables(block_num, log_idx, table_id, table_name, key_schema, val_schema, key_names, val_names)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        ",
+        &[
+            &U64::from(block_num),
+            &U64::from(log_idx),
+            table_id,
+            &table_name,
+            &key_schema,
+            &val_schema,
+            &key_names,
+            &val_names,
+        ],
+    )
+    .await
+    .map(|_| ())
+    .wrap_err("inserting new table")
 }
 
 #[tracing::instrument(level="debug" skip_all)]

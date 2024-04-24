@@ -17,6 +17,18 @@ create table if not exists records(
 );
 create index if not exists "records_table_key" on records using gin(table_id, key);
 
+create table if not exists tables(
+    block_num numeric,
+    log_idx numeric,
+    table_id bytea,
+    table_name text,
+    key_schema bytea,
+    val_schema bytea,
+    key_names text[],
+    val_names text[],
+    primary key (table_id)
+);
+
 create or replace function b2i8(bytea_column bytea)
 returns bigint as
 $$
