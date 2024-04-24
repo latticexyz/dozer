@@ -17,7 +17,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-
+use clap::Parser;
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::{eyre, ContextCompat, WrapErr};
 use ruint::aliases::{U256, U64};
@@ -71,14 +71,50 @@ sol! {
 
 static SCHEMA: &'static str = include_str!("./schema.sql");
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    pg_url: Option<String>,
+
+    #[arg(short, long)]
+    eth_url: Option<String>,
+}
+
+impl Args {
+    fn pg_url(&self) -> String {
+        match &self.pg_url {
+            Some(u) => u.clone(),
+            None => {
+                if let Ok(u) = std::env::var("PG_URL") {
+                    u
+                } else {
+                    String::from("postgres://localhost/imud")
+                }
+            }
+        }
+    }
+    fn eth_url(&self) -> url::Url {
+        match &self.eth_url {
+            Some(u) => u.parse().expect("unable to parse eth url"),
+            None => {
+                if let Ok(u) = std::env::var("ETH_URL") {
+                    u.parse().expect("unable to parse eth url")
+                } else {
+                    "http://localhost:8545".parse().unwrap()
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Config {
     pool: Pool,
 }
 
 fn api_ro_pg(cstr: &str) -> Pool {
-    let mut pg_config =
-        tokio_postgres::Config::from_str(cstr).expect("unable to parse database url");
+    let mut pg_config = tokio_postgres::Config::from_str(cstr).expect("unable to connect to ro pg");
     pg_config.user("uapi");
     let pg_mgr = Manager::from_config(
         pg_config,
@@ -90,7 +126,7 @@ fn api_ro_pg(cstr: &str) -> Pool {
     Pool::builder(pg_mgr)
         .max_size(16)
         .build()
-        .expect("unable to build new pool")
+        .expect("unable to build new ro pool")
 }
 
 #[tokio::main]
@@ -103,19 +139,15 @@ async fn main() -> eyre::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let (mut w_pg, w_conn) =
-        tokio_postgres::connect("host=localhost user=postgres dbname=imud", NoTls).await?;
+    let args = Args::parse();
+    let (mut w_pg, w_conn) = tokio_postgres::connect(&args.pg_url(), NoTls).await?;
     tokio::spawn(async move {
         if let Err(e) = w_conn.await {
             panic!("database writer error: {}", e)
         }
     });
     let eth_client = ProviderBuilder::new()
-        .on_http(
-            "https://rpc.holesky.redstone.xyz"
-                .parse()
-                .expect("unable to parse rpc url"),
-        )
+        .on_http(args.eth_url())
         .expect("unable to build eth client");
     {
         w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
@@ -123,7 +155,7 @@ async fn main() -> eyre::Result<()> {
     }
 
     let config = Config {
-        pool: api_ro_pg("postgres://localhost/imud"),
+        pool: api_ro_pg(&args.pg_url()),
     };
 
     let (app, listener) = (

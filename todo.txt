@@ -10,7 +10,7 @@ x validate incoming chain data from rpc
 x find a good response compression strategy
 x http server timeouts
 x save new mud tables to pg
-- eth url and db url from flags
+x eth url and db url from flags
 - add decoded records query api
 - add api specs to readme
 - add point-in-time records query
@@ -20,5 +20,6 @@ x save new mud tables to pg
 - review potential for batching rpc / pg ops
 - rpc client timeouts
 - pg query timeout
+- pg tls connection
 - http rate limiter
 - integration test that hits real endpoints with stable data
