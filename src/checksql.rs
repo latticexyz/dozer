@@ -1,8 +1,9 @@
+use sqlparser::{
+    ast::{visit_expressions, visit_relations, Expr},
+    dialect::PostgreSqlDialect,
+    parser::Parser,
+};
 use std::ops::ControlFlow;
-
-use sqlparser::ast::{visit_expressions, visit_relations, Expr};
-use sqlparser::dialect::PostgreSqlDialect;
-use sqlparser::parser::Parser;
 
 pub fn unknown_table(sql: &str, allowed_tables: &[&str]) -> eyre::Result<bool> {
     let ast = Parser::parse_sql(&PostgreSqlDialect {}, sql)?;
