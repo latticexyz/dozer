@@ -11,6 +11,7 @@ x find a good response compression strategy
 x http server timeouts
 x save new mud tables to pg
 x eth url and db url from flags
+x ci tests. include pg for no-dep testing
 - add decoded records query api
 - add api specs to readme
 - add point-in-time records query
