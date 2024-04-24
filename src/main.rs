@@ -897,7 +897,7 @@ fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: &Bytes) {
 
 #[cfg(test)]
 mod tests {
-    use pgtemp::PgTempDB;
+    use postgresql_embedded::{PostgreSQL, Settings};
 
     use super::*;
     use std::sync::Once;
@@ -907,7 +907,7 @@ mod tests {
     fn logging() {
         LOGGING_INIT.call_once(|| {
             let subscriber = FmtSubscriber::builder()
-                .with_max_level(tracing::Level::DEBUG)
+                .with_max_level(tracing::Level::INFO)
                 .finish();
             tracing::subscriber::set_global_default(subscriber)
                 .expect("setting default subscriber failed");
@@ -953,8 +953,14 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index() {
         logging();
-        let db = &PgTempDB::async_new().await;
-        let mut pg = test_pg(&db.connection_string()).await;
+        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("imud-test")
+            .await
+            .expect("creating test db");
+
+        let mut pg = test_pg(&db.settings().url("imud-test")).await;
         let pgtx = pg.transaction().await.expect("opening index tx");
         pgtx.execute(
             "insert into blocks(num, hash) values ($1, $2)",
@@ -974,8 +980,15 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index_reorg() {
         logging();
-        let db = &PgTempDB::async_new().await;
-        let mut pg = test_pg(&db.connection_string()).await;
+        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("imud-test")
+            .await
+            .expect("creating test db");
+
+        let mut pg = test_pg(&db.settings().url("imud-test")).await;
+
         let pgtx = pg.transaction().await.expect("opening index tx");
 
         pgtx.execute(

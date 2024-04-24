@@ -39,4 +39,4 @@
     url = "2.5"
 
 [dev-dependencies]
-    pgtemp = "0.2"
+    postgresql_embedded = "0.8"
