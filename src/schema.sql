@@ -50,6 +50,6 @@ begin
     if i + n - 1 > length(data) then
         raise exception 'index out of bounds. position % plus length % exceeds total length %.', i, n, length(data);
     end if;
-    return substring(data from i for n);  -- substring is 1-index
+    return substring(data from i+1 for n);  -- substring is 1-index
 end;
 $$ language plpgsql strict immutable;

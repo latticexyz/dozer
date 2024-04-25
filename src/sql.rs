@@ -88,7 +88,7 @@ mod tests {
                 }
             )
             .unwrap(),
-            "with counter as (select b2n(sdec(static_data, 1, 4)) as value from records where expired_block_num is null and table_id = '\\x74620000000000000000000000000000436f756e746572000000000000000000') select value from counter"
+            "with counter as (select b2n(sdec(static_data, 0, 4)) as value from records where expired_block_num is null and table_id = '\\x74620000000000000000000000000000436f756e746572000000000000000000') select value from counter"
         )
     }
 }
