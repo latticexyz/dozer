@@ -5,20 +5,155 @@ use eyre::{eyre, Result, WrapErr};
 use ruint::aliases::U64;
 use tokio_postgres::{Client, Row, Transaction};
 
+pub mod field {
+    #[derive(Debug, PartialEq)]
+    pub enum Kind {
+        Static(Static),
+        Dynamic(Dynamic),
+    }
+    #[derive(Debug, PartialEq)]
+    pub enum Static {
+        Numeric(usize),
+        Bytea(usize),
+    }
+    #[derive(Debug, PartialEq)]
+    pub enum Dynamic {
+        Bytea,
+        Text,
+        Array(Static),
+    }
+    impl Kind {
+        pub fn from_schema_type(t: u8) -> eyre::Result<Self> {
+            Ok(match t {
+                n if t < 32 => Kind::Static(Static::Numeric(n as usize + 1)),
+                n if t < 64 => Kind::Static(Static::Numeric(n as usize - 31)),
+                n if t < 96 => Kind::Static(Static::Bytea(n as usize - 63)),
+                _ if t == 96 => Kind::Static(Static::Bytea(1)),
+                _ if t == 97 => Kind::Static(Static::Bytea(20)),
+                n if t < 130 => Kind::Dynamic(Dynamic::Array(Static::Numeric(n as usize - 97))),
+                n if t < 162 => Kind::Dynamic(Dynamic::Array(Static::Numeric(n as usize - 129))),
+                n if t < 194 => Kind::Dynamic(Dynamic::Array(Static::Bytea(n as usize - 161))),
+                _ if t == 194 => Kind::Dynamic(Dynamic::Array(Static::Bytea(1))),
+                _ if t == 195 => Kind::Dynamic(Dynamic::Array(Static::Bytea(20))),
+                _ if t == 196 => Kind::Dynamic(Dynamic::Bytea),
+                _ if t == 197 => Kind::Dynamic(Dynamic::Text),
+                _ => return Err(eyre::eyre!("unknown type: {:x}", t)),
+            })
+        }
+        pub fn size(&self) -> Option<usize> {
+            todo!()
+        }
+        pub fn to_sql(&self, pos: usize, name: &str) -> String {
+            match self {
+                Kind::Static(t) => match t {
+                    Static::Numeric(size) => {
+                        format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
+                    }
+                    Static::Bytea(size) => {
+                        format!("sdec(static_data, {}, {}) as {}", pos, size, name)
+                    }
+                },
+                Kind::Dynamic(t) => {
+                    match t {
+                        Dynamic::Bytea => {
+                            format!("ddec(encoded_lengths, dynamic_data, {}) as {}", pos, name)
+                        }
+                        Dynamic::Text => {
+                            format!("convert_from(ddec(encoded_lengths, dynamic_data, {}), 'UTF8') as {}", pos, name)
+                        }
+                        Dynamic::Array(it) => match it {
+                            Static::Bytea(size) => {
+                                format!(
+                                    "b2ab(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
+                                    pos, size, name
+                                )
+                            }
+                            Static::Numeric(size) => {
+                                format!(
+                                    "b2an(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
+                                    pos, size, name
+                                )
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn test_from_schema_type() {
+            assert_eq!(
+                Kind::Static(Static::Numeric(32)),
+                Kind::from_schema_type(0x1F).unwrap()
+            );
+            assert_eq!(
+                Kind::Static(Static::Numeric(32)),
+                Kind::from_schema_type(0x3f).unwrap()
+            );
+            assert_eq!(
+                Kind::Static(Static::Bytea(32)),
+                Kind::from_schema_type(0x5f).unwrap()
+            );
+            assert_eq!(
+                Kind::Static(Static::Bytea(1)),
+                Kind::from_schema_type(0x60).unwrap()
+            );
+            assert_eq!(
+                Kind::Static(Static::Bytea(20)),
+                Kind::from_schema_type(0x61).unwrap()
+            );
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))),
+                Kind::from_schema_type(0x81).unwrap()
+            );
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))),
+                Kind::from_schema_type(0xA1).unwrap()
+            );
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Array(Static::Bytea(32))),
+                Kind::from_schema_type(0xC1).unwrap()
+            );
+        }
+        #[test]
+        fn test_to_sql() {
+            assert_eq!(
+                Kind::Static(Static::Numeric(32)).to_sql(1, "foo"),
+                "b2n(sdec(static_data, 1, 32)) as foo"
+            );
+            assert_eq!(
+                Kind::Static(Static::Bytea(32)).to_sql(1, "foo"),
+                "sdec(static_data, 1, 32) as foo"
+            );
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Array(Static::Bytea(32))).to_sql(0, "foo"),
+                "b2ab(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
+            );
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))).to_sql(0, "foo"),
+                "b2an(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
+            );
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Bytea).to_sql(0, "foo"),
+                "ddec(encoded_lengths, dynamic_data, 0) as foo"
+            );
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Text).to_sql(0, "foo"),
+                "convert_from(ddec(encoded_lengths, dynamic_data, 0), 'UTF8') as foo"
+            );
+        }
+    }
+}
+
 pub struct Schema {
     pub table_id: FixedBytes<32>,
     pub key_names: Vec<String>,
     pub val_names: Vec<String>,
     pub key_schema: FixedBytes<32>,
     pub val_schema: FixedBytes<32>,
-}
-
-fn static_len(schema_type: u8) -> usize {
-    match schema_type {
-        _ if schema_type > 97 => 0,
-        97 => 20,
-        _ => (schema_type as usize & 31) + 1,
-    }
 }
 
 impl Schema {
@@ -103,29 +238,8 @@ impl Schema {
         String::from_utf8(b).unwrap()
     }
 
-    pub fn nstatic(&self) -> usize {
-        let mut b = [0u8; 2];
-        b[0] = self.val_schema[0];
-        b[1] = self.val_schema[1];
-        i16::from_be_bytes(b) as usize
-    }
-
-    #[allow(dead_code)]
-    pub fn ndynamic(&self) -> usize {
-        self.val_schema[2] as usize
-    }
-
-    fn sstart(&self, pos: usize) -> usize {
-        self.val_schema
-            .iter()
-            .skip(4)
-            .take(pos)
-            .map(|f| static_len(*f))
-            .sum()
-    }
-
     pub fn get_col_sql(&self, name: &str) -> Result<String> {
-        let pos = self
+        let mut pos = self
             .val_names
             .iter()
             .position(|n| n == name)
@@ -134,42 +248,29 @@ impl Schema {
                 self.table_name(),
                 name
             )))?;
-        if pos >= self.nstatic() {
-            return Err(eyre!(format!(
-                "{}/{} is dynamic. only static works for now",
-                self.table_name(),
-                name
-            )));
+        let schema_type = field::Kind::from_schema_type(self.val_schema[4 + pos])?;
+        if matches!(schema_type, field::Kind::Static(_)) {
+            pos = self
+                .val_schema
+                .iter()
+                .skip(4)
+                .take(pos)
+                .map(|b| field::Kind::from_schema_type(*b).unwrap().size().unwrap())
+                .sum()
         }
-        Ok(format!(
-            "b2n(sdec(static_data, {}, {})) as {}",
-            self.sstart(pos) + 1, //sdec assumes 1-index
-            static_len(self.val_schema[4 + pos]),
-            name,
-        ))
+        Ok(schema_type.to_sql(pos, name))
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod schema_tests {
     use super::*;
     use alloy::primitives::fixed_bytes;
 
     #[test]
-    fn test_byte_len() {
-        assert_eq!(04, static_len(0x03));
-        assert_eq!(32, static_len(0x1f));
-        assert_eq!(32, static_len(0x3f));
-        assert_eq!(01, static_len(0x60));
-        assert_eq!(20, static_len(0x61));
-    }
-
-    #[test]
-    fn test_sstart() {
+    fn test_get_col_sql() {
         let schema = &Schema {
-            table_id: fixed_bytes!(
-                "74620000000000000000000000000000436f756e746572000000000000000000"
-            ),
+            table_id: fixed_bytes!(),
             key_names: vec![],
             val_names: vec![String::from("value")],
             key_schema: fixed_bytes!(),
@@ -177,10 +278,12 @@ mod tests {
                 "0004010003000000000000000000000000000000000000000000000000000000"
             ),
         };
-        assert_eq!(schema.sstart(0), 0)
+        assert_eq!(
+            schema.get_col_sql("value").unwrap(),
+            "b2n(sdec(static_data, 0, 4)) as value"
+        )
     }
 }
-
 pub struct Data<'a> {
     d: DynamicData<'a>,
     s: &'a [u8],
