@@ -1,5 +1,10 @@
-mod checksql;
-use checksql::{unknown_function, unknown_table};
+mod api_error;
+mod schema;
+mod sql;
+
+use api_error::ApiError;
+use schema::Schema;
+use sql::ParsedQuery;
 
 use alloy::{
     hex::{self, ToHexExt},
@@ -7,7 +12,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder, ReqwestProvider},
     rpc::types::eth::{Block, BlockNumberOrTag, Filter, Log},
     sol,
-    sol_types::{SolEvent, SolType},
+    sol_types::SolEvent,
 };
 use async_trait::async_trait;
 use axum::{
@@ -21,7 +26,7 @@ use clap::Parser;
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::{eyre, ContextCompat, WrapErr};
 use ruint::aliases::{U256, U64};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use std::{borrow::Borrow, cmp, str::FromStr, time::Duration};
 use tokio;
@@ -32,6 +37,8 @@ use tokio_postgres::{
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing;
 use tracing_subscriber::FmtSubscriber;
+
+use crate::schema::Data;
 
 sol! {
  type EncodedLengths is bytes32;
@@ -161,7 +168,7 @@ async fn main() -> eyre::Result<()> {
     let (app, listener) = (
         Router::new()
             .route("/", get(|| async { "hello\n" }))
-            .route("/q", post(get_records))
+            .route("/q", post(query))
             .with_state(config.clone())
             .layer(CompressionLayer::new())
             .layer(TimeoutLayer::new(Duration::from_secs(10)))
@@ -208,72 +215,21 @@ async fn main() -> eyre::Result<()> {
     axum::serve(listener, app).await.wrap_err("serving http")
 }
 
-enum ApiError {
-    User(axum::http::StatusCode, String),
-    Server(eyre::Report),
-}
-
-#[derive(Serialize)]
-struct ApiErrorMessage {
-    msg: String,
-}
-
-impl From<tokio_postgres::Error> for ApiError {
-    fn from(err: tokio_postgres::Error) -> Self {
-        ApiError::Server(eyre!("database-error={}", err.to_string()))
-    }
-}
-
-impl axum::response::IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, message) = match self {
-            Self::User(status, msg) => {
-                tracing::error!("user-error={}", msg);
-                (status, msg)
-            }
-            Self::Server(e) => {
-                tracing::error!(%e, "server-error={:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    String::from("server error"),
-                )
-            }
-        };
-        let m = ApiErrorMessage {
-            msg: String::from(message),
-        };
-        (status, Json(m)).into_response()
-    }
-}
-
-impl From<eyre::Report> for ApiError {
-    fn from(value: eyre::Report) -> Self {
-        ApiError::Server(value)
-    }
-}
-
 #[derive(Deserialize)]
 struct GetRecsReq {
     query: String,
     values: Vec<Value>,
 }
 
-async fn get_records(
+async fn query(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    if unknown_table(&req.query, &vec!["records"])? {
-        return Err(ApiError::User(
-            StatusCode::BAD_REQUEST,
-            String::from("unknown table"),
-        ));
-    }
-    if unknown_function(&req.query, &vec!["count", "b2i8"])? {
-        return Err(ApiError::User(
-            StatusCode::BAD_REQUEST,
-            String::from("unknown function"),
-        ));
-    }
+    let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
+    let parsed_query = ParsedQuery::new(&req.query)?;
+    let schema = Schema::from_pg(&pg, parsed_query.tables()?).await?;
+    let query = parsed_query.enhance(&schema)?;
+
     let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
     for val in req.values {
         match val {
@@ -293,7 +249,7 @@ async fn get_records(
         .map(|x| x.as_ref() as &(dyn ToSql + Sync))
         .collect::<Vec<_>>();
     let rows = conn
-        .query(dbg!(&req.query), &vals[..])
+        .query(dbg!(&query), &vals[..])
         .await
         .wrap_err("querying records table")?;
 
@@ -575,7 +531,15 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
                     "746273746f72650000000000000000005461626c657300000000000000000000"
                 );
                 if rec.table_id == TABLES_TABLE_ID {
-                    save_schema(tx, block_num, log_idx, &rec).await?
+                    let schema = &Schema::from_data(
+                        *rec.key_tuple.first().wrap_err("mising table_id from key")?,
+                        &Data::new(
+                            rec.encoded_lengths,
+                            rec.dynamic_data.borrow(),
+                            rec.static_data.borrow(),
+                        )?,
+                    )?;
+                    schema.insert(tx, block_num, log_idx).await?
                 }
             }
             &Store_SpliceDynamicData::SIGNATURE_HASH => {
@@ -604,139 +568,6 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
         .record("n", n)
         .record("skipped", skipped);
     Ok(())
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-struct DynamicData<'a> {
-    f0: Option<&'a [u8]>,
-    f1: Option<&'a [u8]>,
-    f2: Option<&'a [u8]>,
-    f3: Option<&'a [u8]>,
-    f4: Option<&'a [u8]>,
-}
-
-impl<'a> DynamicData<'a> {
-    fn new(data: &'a [u8], el: FixedBytes<32>) -> eyre::Result<Self> {
-        fn dec(s: &[u8]) -> usize {
-            s.into_iter().fold(0, |n, b| n << 8 | *b as usize)
-        }
-        let l4 = dec(&el[0..5]);
-        let l3 = dec(&el[5..10]);
-        let l2 = dec(&el[10..15]);
-        let l1 = dec(&el[15..20]);
-        let l0 = dec(&el[20..25]);
-        let total = dec(&el[25..32]);
-        if total != l0 + l1 + l2 + l3 + l4 {
-            return Err(eyre!("corrupt dynamic data"));
-        }
-        Ok(DynamicData {
-            f4: data.get(l3..l3 + l4).filter(|&sub| !sub.is_empty()),
-            f3: data.get(l2..l2 + l3).filter(|&sub| !sub.is_empty()),
-            f2: data.get(l1..l1 + l2).filter(|&sub| !sub.is_empty()),
-            f1: data.get(l0..l0 + l1).filter(|&sub| !sub.is_empty()),
-            f0: data.get(0..l0).filter(|&sub| !sub.is_empty()),
-        })
-    }
-}
-
-#[cfg(test)]
-mod dynamic_data_test {
-    use super::DynamicData;
-    use alloy::primitives::fixed_bytes;
-    #[test]
-    fn test_new_error() {
-        let el = fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000020");
-        let dd = &[1u8; 32];
-        let dd = DynamicData::new(dd, el);
-        assert!(dd.is_err());
-    }
-    #[test]
-    fn test_new_empty() {
-        let el = fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
-        let dd = &[0u8];
-        let dd = DynamicData::new(dd, el);
-        assert!(dd.is_ok());
-
-        let dd = dd.unwrap();
-        assert!(dd.f0.is_none());
-        assert!(dd.f1.is_none());
-        assert!(dd.f2.is_none());
-        assert!(dd.f3.is_none());
-        assert!(dd.f4.is_none());
-    }
-    #[test]
-    fn test_new_not_empty() {
-        let el = fixed_bytes!("0000000000000000000000000000000000000000000000002000000000000020");
-        let dd = &[1u8; 32];
-        let dd = DynamicData::new(dd, el);
-        assert!(dd.is_ok());
-
-        let dd = dd.unwrap();
-        assert!(dd.f0.is_some());
-        assert!(dd.f1.is_none());
-        assert!(dd.f2.is_none());
-        assert!(dd.f3.is_none());
-        assert!(dd.f4.is_none());
-
-        assert_eq!(dd.f0.unwrap(), &[1u8; 32])
-    }
-}
-
-#[tracing::instrument(level="debug" skip_all)]
-async fn save_schema(
-    tx: &Transaction<'_>,
-    block_num: u64,
-    log_idx: u64,
-    rec: &Store_SetRecord,
-) -> eyre::Result<()> {
-    let table_id = rec.key_tuple.first().wrap_err("missing table_id")?;
-    let table_name: Vec<u8> = table_id[15..32]
-        .iter()
-        .map(|c| *c)
-        .filter(|c| *c > 0 && *c < 255) //ascii table names
-        .collect();
-    let table_name = String::from_utf8(table_name).unwrap();
-    let key_schema = FixedBytes::<32>::from_slice(
-        rec.static_data
-            .get(32..64)
-            .wrap_err("unable to get key_schema")?,
-    );
-    let val_schema = FixedBytes::<32>::from_slice(
-        rec.static_data
-            .get(64..96)
-            .wrap_err("unable to get val_schema")?,
-    );
-    let ddat = DynamicData::new(rec.dynamic_data.borrow(), rec.encoded_lengths)?;
-    type SolArrayOf<T> = sol! { T[] };
-    let key_names = SolArrayOf::<sol!(string)>::abi_decode(
-        ddat.f0.expect("missing dynamic field for key names"),
-        false,
-    )?;
-    let val_names = SolArrayOf::<sol!(string)>::abi_decode(
-        ddat.f1.expect("missing dynamic field for val names"),
-        false,
-    )?;
-    tracing::info!("new-schema table={:x}/{}", table_id, table_name,);
-    tx.execute(
-        "
-        insert into tables(block_num, log_idx, table_id, table_name, key_schema, val_schema, key_names, val_names)
-        values ($1, $2, $3, $4, $5, $6, $7, $8)
-        ",
-        &[
-            &U64::from(block_num),
-            &U64::from(log_idx),
-            table_id,
-            &table_name,
-            &key_schema,
-            &val_schema,
-            &key_names,
-            &val_names,
-        ],
-    )
-    .await
-    .map(|_| ())
-    .wrap_err("inserting new table")
 }
 
 #[tracing::instrument(level="debug" skip_all)]

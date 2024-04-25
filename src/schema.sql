@@ -20,22 +20,36 @@ create index if not exists "records_table_key" on records using gin(table_id, ke
 create table if not exists tables(
     block_num numeric,
     log_idx numeric,
-    table_id bytea,
-    table_name text,
+    id bytea,
+    name text,
     key_schema bytea,
     val_schema bytea,
     key_names text[],
     val_names text[],
-    primary key (table_id)
+    primary key (id)
 );
 
-create or replace function b2i8(bytea_column bytea)
-returns bigint as
-$$
+create or replace function b2n(b bytea)
+returns numeric as $$
 declare
-    result bigint;
+    n numeric := 0;
 begin
-    result := ('x' || encode(substring(bytea_column from 1 for 8), 'hex'))::bit(64)::bigint;
-    return result;
+    if length(b) > 32 then
+        raise exception 'input exceeds maximum length of 32 bytes';
+    end if;
+    for i in 1..length(b) loop
+        n:= n * 256 + get_byte(b, i - 1); -- Shift left by 8 bits and add current byte directly
+    end loop;
+    return n;
 end;
-$$ language plpgsql;
+$$ language plpgsql strict immutable;
+
+create or replace function sdec(data bytea, i int, n int)
+returns bytea as $$
+begin
+    if i + n - 1 > length(data) then
+        raise exception 'index out of bounds. position % plus length % exceeds total length %.', i, n, length(data);
+    end if;
+    return substring(data from i for n);  -- substring is 1-index
+end;
+$$ language plpgsql strict immutable;
