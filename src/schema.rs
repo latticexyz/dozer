@@ -13,8 +13,12 @@ pub struct Schema {
     pub val_schema: FixedBytes<32>,
 }
 
-fn bit_len(_: &u8) -> usize {
-    4
+fn static_len(schema_type: u8) -> usize {
+    match schema_type {
+        _ if schema_type > 97 => 0,
+        97 => 20,
+        _ => (schema_type as usize & 31) + 1,
+    }
 }
 
 impl Schema {
@@ -116,7 +120,7 @@ impl Schema {
             .iter()
             .skip(4)
             .take(pos)
-            .map(|f| bit_len(f))
+            .map(|f| static_len(*f))
             .sum()
     }
 
@@ -140,7 +144,7 @@ impl Schema {
         Ok(format!(
             "b2n(sdec(static_data, {}, {})) as {}",
             self.sstart(pos) + 1, //sdec assumes 1-index
-            bit_len(&self.val_schema[pos]),
+            static_len(self.val_schema[4 + pos]),
             name,
         ))
     }
@@ -150,6 +154,15 @@ impl Schema {
 mod tests {
     use super::*;
     use alloy::primitives::fixed_bytes;
+
+    #[test]
+    fn test_byte_len() {
+        assert_eq!(04, static_len(0x03));
+        assert_eq!(32, static_len(0x1f));
+        assert_eq!(32, static_len(0x3f));
+        assert_eq!(01, static_len(0x60));
+        assert_eq!(20, static_len(0x61));
+    }
 
     #[test]
     fn test_sstart() {
