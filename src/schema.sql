@@ -53,3 +53,62 @@ begin
     return substring(data from i+1 for n);  -- substring is 1-index
 end;
 $$ language plpgsql strict immutable;
+
+create or replace function b2ab(data bytea, n int)
+returns bytea[] as $$
+declare
+    nparts int;
+    parts bytea[];
+begin
+    nparts := ceil(length(data) / n::float);
+    parts := array[]::bytea[];
+    for i in 0..(nparts- 1) loop
+        parts := array_append(parts, substring(data, (i * n) + 1, n));
+    end loop;
+    return result;
+end;
+$$ language plpgsql;
+
+create or replace function ddec(encoded_lengths bytea, dynamic_data bytea, field int)
+returns bytea as $$
+declare
+    dynamic_data_length int;
+    field_start int := 1; --substring is index-1
+    field_length int;
+    tmp int;
+begin
+    if length(encoded_lengths) != 32 then
+        raise exception 'encoded_length must be 32 bytes got %', length(encoded_lengths);
+    end if;
+
+    dynamic_data_length := get_byte(encoded_lengths, 25)::int * 256^6 +
+                    get_byte(encoded_lengths, 26)::int * 256^5 +
+                    get_byte(encoded_lengths, 27)::int * 256^4 +
+                    get_byte(encoded_lengths, 28)::int * 256^3 +
+                    get_byte(encoded_lengths, 29)::int * 256^2 +
+                    get_byte(encoded_lengths, 30)::int * 256 +
+                    get_byte(encoded_lengths, 31)::int;
+    IF dynamic_data_length != length(dynamic_data) THEN
+        RAISE EXCEPTION 'Total length does not match dynamic_data length.';
+    END IF;
+
+    tmp := 20 - (field * 5);
+    field_length := get_byte(encoded_lengths, tmp)::int * 256^4 +
+                    get_byte(encoded_lengths, tmp + 1)::int * 256^3 +
+                    get_byte(encoded_lengths, tmp + 2)::int * 256^2 +
+                    get_byte(encoded_lengths, tmp + 3)::int * 256 +
+                    get_byte(encoded_lengths, tmp + 4)::int;
+
+    -- for i in 0..-1 doesn't run
+    -- for i in 0..3 runs 4 times
+    FOR i IN 0..(field-1) LOOP
+        tmp := 20 - (i * 5);
+        field_start := field_start + get_byte(encoded_lengths, tmp)::int * 256^4 +
+                                get_byte(encoded_lengths, tmp + 1)::int * 256^3 +
+                                get_byte(encoded_lengths, tmp + 2)::int * 256^2 +
+                                get_byte(encoded_lengths, tmp + 3)::int * 256 +
+                                get_byte(encoded_lengths, tmp + 4)::int;
+    END LOOP;
+    RETURN substring(dynamic_data FROM field_start FOR field_length);
+end;
+$$ language plpgsql;
