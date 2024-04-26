@@ -378,3 +378,73 @@ mod dynamic_data_test {
         assert_eq!(dd.f0.unwrap(), &[1u8; 32])
     }
 }
+
+#[cfg(test)]
+mod pl_pgsql_test {
+    use alloy::primitives::fixed_bytes;
+    use postgresql_embedded::{PostgreSQL, Settings};
+    use tokio_postgres::{Client, NoTls};
+
+    static SCHEMA: &'static str = include_str!("./schema.sql");
+
+    async fn test_pg(cstr: &str) -> Client {
+        let (client, connection) = tokio_postgres::connect(cstr, NoTls)
+            .await
+            .expect("unable to start test database");
+        tokio::spawn(connection);
+        client
+            .batch_execute(SCHEMA)
+            .await
+            .expect("resetting schema");
+        client
+    }
+
+    #[tokio::test]
+    async fn test_ddec_empty() {
+        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("imud-test")
+            .await
+            .expect("creating test db");
+        let pg = test_pg(&db.settings().url("imud-test")).await;
+
+        let encoded_lengths =
+            fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
+        let dynamic_data = &[0u8; 0];
+        let row = pg
+            .query_one("select ddec($1, $2, 0)", &[&encoded_lengths, &dynamic_data])
+            .await
+            .expect("issue with query");
+        let res: &[u8] = row.get(0);
+        assert_eq!(&[0u8; 0], res)
+    }
+
+    #[tokio::test]
+    async fn test_ddec() {
+        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("imud-test")
+            .await
+            .expect("creating test db");
+        let pg = test_pg(&db.settings().url("imud-test")).await;
+
+        let encoded_lengths =
+            fixed_bytes!("0000000000000000000000000000000000000020000000004000000000000060");
+        let dynamic_data = &[1u8; 96];
+        let row = pg
+            .query_one("select ddec($1, $2, 0)", &[&encoded_lengths, &dynamic_data])
+            .await
+            .expect("issue with query");
+        let res: &[u8] = row.get(0);
+        assert_eq!(&[1u8; 64], res);
+
+        let row = pg
+            .query_one("select ddec($1, $2, 1)", &[&encoded_lengths, &dynamic_data])
+            .await
+            .expect("issue with query");
+        let res: &[u8] = row.get(0);
+        assert_eq!(&[1u8; 32], res)
+    }
+}
