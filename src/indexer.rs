@@ -286,16 +286,33 @@ pub async fn index<T: EthApi>(remote: &T, pg: &mut Client) -> eyre::Result<(), I
 async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> {
     let (mut skipped, n) = (0, logs.len());
     for log in logs {
-        let (block_num, log_idx) = (
+        let (block_num, log_addr, log_idx) = (
             log.block_number.wrap_err("missing block num from log")?,
+            *log.address(),
             log.log_index.wrap_err("missing log idx from log")?,
         );
         match log.topics().first().unwrap_or_default() {
             &Store_SetRecord::SIGNATURE_HASH => {
                 let rec = Store_SetRecord::decode_log_data(log.data(), true)
                     .wrap_err("decoding set record")?;
-                expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, false).await?;
-                set_record(&tx, log.block_number.unwrap(), log.log_index.unwrap(), &rec).await?;
+                expire_record(
+                    &tx,
+                    block_num,
+                    log_idx,
+                    log_addr,
+                    rec.table_id,
+                    &rec.key_tuple,
+                    false,
+                )
+                .await?;
+                set_record(
+                    &tx,
+                    log_addr,
+                    log.block_number.unwrap(),
+                    log.log_index.unwrap(),
+                    &rec,
+                )
+                .await?;
 
                 const TABLES_TABLE_ID: FixedBytes<32> = fixed_bytes!(
                     "746273746f72650000000000000000005461626c657300000000000000000000"
@@ -315,21 +332,48 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
             &Store_SpliceDynamicData::SIGNATURE_HASH => {
                 let rec = Store_SpliceDynamicData::decode_log_data(log.data(), true)
                     .wrap_err("decoding splice dynamic")?;
-                let new_rec = splice_dynamic(&tx, &rec).await?;
-                expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, false).await?;
-                set_record(&tx, block_num, log_idx, &new_rec).await?;
+                let new_rec = splice_dynamic(&tx, *log.address(), &rec).await?;
+                expire_record(
+                    &tx,
+                    block_num,
+                    log_idx,
+                    log_addr,
+                    rec.table_id,
+                    &rec.key_tuple,
+                    false,
+                )
+                .await?;
+                set_record(&tx, *log.address(), block_num, log_idx, &new_rec).await?;
             }
             &Store_SpliceStaticData::SIGNATURE_HASH => {
                 let rec = Store_SpliceStaticData::decode_log_data(log.data(), true)
                     .wrap_err("decoding splice static")?;
-                let new_rec = splice_static(&tx, &rec).await?;
-                expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, false).await?;
-                set_record(&tx, block_num, log_idx, &new_rec).await?
+                let new_rec = splice_static(&tx, log_addr, &rec).await?;
+                expire_record(
+                    &tx,
+                    block_num,
+                    log_idx,
+                    log_addr,
+                    rec.table_id,
+                    &rec.key_tuple,
+                    false,
+                )
+                .await?;
+                set_record(&tx, *log.address(), block_num, log_idx, &new_rec).await?
             }
             &Store_DeleteRecord::SIGNATURE_HASH => {
                 let rec = Store_DeleteRecord::decode_log_data(log.data(), true)
                     .wrap_err("decoding delete record")?;
-                expire_record(&tx, block_num, log_idx, rec.table_id, &rec.key_tuple, true).await?
+                expire_record(
+                    &tx,
+                    block_num,
+                    log_idx,
+                    log_addr,
+                    rec.table_id,
+                    &rec.key_tuple,
+                    true,
+                )
+                .await?
             }
             _ => skipped += 1,
         }
@@ -343,16 +387,18 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
 #[tracing::instrument(level="debug" skip_all)]
 async fn set_record(
     tx: &Transaction<'_>,
+    address: FixedBytes<20>,
     block_num: u64,
     log_idx: u64,
     record: &Store_SetRecord,
 ) -> eyre::Result<()> {
     tx.execute(
         "
-        insert into records(table_id, key, static_data, encoded_lengths, dynamic_data, block_num, log_idx)
-        values($1, $2, $3, $4, $5, $6, $7)
+        insert into records(address, table_id, key, static_data, encoded_lengths, dynamic_data, block_num, log_idx)
+        values($1, $2, $3, $4, $5, $6, $7, $8)
         ",
         &[
+            &address,
             &record.table_id,
             &record.key_tuple,
             &record.static_data.to_vec(),
@@ -372,6 +418,7 @@ async fn expire_record(
     tx: &Transaction<'_>,
     block_num: u64,
     log_idx: u64,
+    address: FixedBytes<20>,
     table_id: FixedBytes<32>,
     key: &Vec<FixedBytes<32>>,
     deleted: bool,
@@ -381,13 +428,15 @@ async fn expire_record(
             update records
             set expired_block_num =  $1, expired_log_idx=$2
             where expired_block_num is null and expired_log_idx is null
-            and table_id = $3
-            and key = $4
-            and deleted = $5
+            and address = $3
+            and table_id = $4
+            and key = $5
+            and deleted = $6
         ",
         &[
             &U64::from(block_num),
             &U64::from(log_idx),
+            &address,
             &table_id,
             &key,
             &deleted,
@@ -401,6 +450,7 @@ async fn expire_record(
 #[tracing::instrument(level="debug" skip_all)]
 async fn splice_static(
     tx: &Transaction<'_>,
+    address: FixedBytes<20>,
     record: &Store_SpliceStaticData,
 ) -> eyre::Result<Store_SetRecord> {
     let prev = tx
@@ -408,12 +458,13 @@ async fn splice_static(
             "
             select static_data, encoded_lengths, dynamic_data
             from records
-            where table_id = $1
-            and key = $2
+            where address = $1
+            and table_id = $2
+            and key = $3
             and expired_block_num is null
             and not deleted
             ",
-            &[&record.table_id, &record.key_tuple],
+            &[&address, &record.table_id, &record.key_tuple],
         )
         .await?;
     let (mut sdata, dlen, ddata) = match prev.len() {
@@ -445,6 +496,7 @@ async fn splice_static(
 #[tracing::instrument(level="debug" skip_all)]
 async fn splice_dynamic(
     tx: &Transaction<'_>,
+    address: FixedBytes<20>,
     record: &Store_SpliceDynamicData,
 ) -> eyre::Result<Store_SetRecord> {
     let prev = tx
@@ -452,12 +504,13 @@ async fn splice_dynamic(
             "
             select static_data, dynamic_data
             from records
-            where table_id = $1
-            and key = $2
+            where address = $1
+            and table_id = $2
+            and key = $3
             and expired_block_num is null
             and not deleted
             ",
-            &[&record.table_id, &record.key_tuple],
+            &[&address, &record.table_id, &record.key_tuple],
         )
         .await
         .wrap_err("unable to find prev record to update")?;
@@ -612,8 +665,8 @@ mod tests {
 
         pgtx.execute(
             r#"
-            insert into records(table_id, key, block_num, log_idx, expired_block_num, expired_log_idx)
-            values ('\x01', '{"\\x01"}', 0, 0, 1, 0), ('\x01', '{"\\x01"}', 1, 0, NULL, NULL)
+            insert into records(address, table_id, key, block_num, log_idx, expired_block_num, expired_log_idx)
+            values ('\x01', '\x01', '{"\\x01"}', 0, 0, 1, 0), ('\x01', '\x01', '{"\\x01"}', 1, 0, NULL, NULL)
             "#,
             &[],
         )
