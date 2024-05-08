@@ -109,6 +109,7 @@ async fn main() -> eyre::Result<()> {
         Router::new()
             .route("/", get(|| async { "hello\n" }))
             .route("/q", post(api::query))
+            .route("/api/logs", get(api::logs))
             .with_state(config.clone())
             .layer(CompressionLayer::new())
             .layer(TimeoutLayer::new(Duration::from_secs(10)))

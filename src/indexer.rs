@@ -187,7 +187,7 @@ async fn next_to_index<F: EthApi>(
                 local_num,
             )));
         }
-        let delta = cmp::min(remote_num - local_num, 10000);
+        let delta = cmp::min(remote_num - local_num, 100);
         let (from, to) = (
             remote
                 .block(BlockNumberOrTag::Number(local_num + 1))
