@@ -1,6 +1,6 @@
 # indexer for mud
 
-- [HTTP API](#api)
+- [Logs API](#logs-api)
 - [Config](#config)
 - [Data Model](#data-model)
 
@@ -10,9 +10,67 @@ HTTP API that allows users to request complete records by table_id,
 key_tuple, and block number. The block number in the request enables
 point-in-time queries.
 
-## API
+## Logs API
 
-XXX
+Returns complete, encoded records. This API is useful because it
+reduces splice{dynamic,static} event logs into a complete Record.
+
+### `GET /api/logs`
+
+#### Request
+
+Query Parameters: `?input=`
+
+Where `input` is a percent encoded JSON object with the following fields:
+
+```
+{
+    "chainId": 0,
+    "address": "",
+    "filter": [
+        {
+            "address": "",
+            "tableId": "",
+            "key0": "",
+            "key1": "",
+        }
+    ]
+}
+```
+
+- If an `input.filter` is provided then `input.address` is ignored.
+- An `input.filter` must have `tableId`
+- An `input.filter` may have `address`, `key0`, or `key1`
+
+#### Response
+
+- Returns (404, "no logs found") when no logs are found in db
+- Returns (200, json_resp) when logs are found
+
+Where `json_resp` is:
+
+```
+{
+    "blockNumber": 0,
+    "logs": [
+        {
+            "address": "0x...",
+            "eventName": "Store_SetRecord",
+            "args": {
+                "tableId": "0x...",
+                "keyTuple": ["0x..."],
+                "staticData": "0x...",
+                "encodedLengths": "0x...",
+                "dynamicData": "0x..."
+            }
+        }
+    ]
+}
+```
+
+Where `blockNumber` is the latest block processed by the indexer and `eventName` is always "Store_SetRecord".
+
+The remaining items are the latest version of the record. (aggregated from all prior set/splice logs)
 
 ## Config
 
@@ -43,16 +101,18 @@ default: `postgres://localhost:imud`
 imud defines the records table as:
 
 ```
-table_id            bytea
-key_tuple           bytea[]
-static_data         bytea
-dynamic_lengths     bytea
-dynamic_data        bytea
-block_num           numeric
-log_idx             int
-expired_block_num   numeric
-expired_log_idx     int
-deleted             bool
+
+table_id bytea
+key_tuple bytea[]
+static_data bytea
+dynamic_lengths bytea
+dynamic_data bytea
+block_num numeric
+log_idx int
+expired_block_num numeric
+expired_log_idx int
+deleted bool
+
 ```
 
 Each row in this table represents a complete record. The latest
@@ -102,3 +162,7 @@ log and in this case we do not carry forward the previous static_data,
 dynamic_lengths, or dynamic_data.
 
 Many logs for a particular table_id/key may exist within a block.
+
+```
+
+```

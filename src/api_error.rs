@@ -13,6 +13,12 @@ pub struct ApiErrorMessage {
     msg: String,
 }
 
+impl From<serde_json::Error> for ApiError {
+    fn from(err: serde_json::Error) -> Self {
+        ApiError::Server(eyre!("json-error={}", err.to_string()))
+    }
+}
+
 impl From<tokio_postgres::Error> for ApiError {
     fn from(err: tokio_postgres::Error) -> Self {
         ApiError::Server(eyre!("database-error={}", err.to_string()))
