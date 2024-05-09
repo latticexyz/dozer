@@ -149,6 +149,7 @@ pub mod field {
 }
 
 pub struct Schema {
+    pub address: FixedBytes<20>,
     pub table_id: FixedBytes<32>,
     pub key_names: Vec<String>,
     pub val_names: Vec<String>,
@@ -157,9 +158,14 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub fn from_data(table_id: FixedBytes<32>, data: &Data) -> Result<Self> {
+    pub fn from_data(
+        address: FixedBytes<20>,
+        table_id: FixedBytes<32>,
+        data: &Data,
+    ) -> Result<Self> {
         type SolArrayOf<T> = sol! { T[] };
         Ok(Schema {
+            address: address,
             table_id: table_id,
             key_schema: FixedBytes::<32>::from_slice(data.s.get(32..64).unwrap()),
             val_schema: FixedBytes::<32>::from_slice(data.s.get(64..96).unwrap()),
@@ -196,16 +202,23 @@ impl Schema {
     }
 
     #[tracing::instrument(level="debug" skip_all)]
-    pub async fn insert(&self, tx: &Transaction<'_>, block_num: u64, log_idx: u64) -> Result<()> {
+    pub async fn insert(
+        &self,
+        tx: &Transaction<'_>,
+        block_num: u64,
+        log_idx: u64,
+        address: FixedBytes<20>,
+    ) -> Result<()> {
         const Q: &str = r#"
-            insert into tables(block_num, log_idx, id, name, key_schema, val_schema, key_names, val_names)
-            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            insert into tables(block_num, log_idx, address, id, name, key_schema, val_schema, key_names, val_names)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#;
         tx.execute(
             Q,
             &[
                 &U64::from(block_num),
                 &U64::from(log_idx),
+                &address,
                 &self.table_id,
                 &self.table_name(),
                 &self.key_schema,
@@ -221,6 +234,7 @@ impl Schema {
 
     fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
         Ok(Schema {
+            address: row.try_get("address")?,
             table_id: row.try_get("id")?,
             key_names: row.try_get("key_names")?,
             key_schema: row.try_get("key_schema")?,
@@ -270,6 +284,7 @@ mod schema_tests {
     #[test]
     fn test_get_col_sql() {
         let schema = &Schema {
+            address: fixed_bytes!(),
             table_id: fixed_bytes!(),
             key_names: vec![],
             val_names: vec![String::from("value")],

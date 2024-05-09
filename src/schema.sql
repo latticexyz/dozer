@@ -21,13 +21,14 @@ create index if not exists "records_table_key" on records using gin(table_id, ke
 create table if not exists tables(
     block_num numeric,
     log_idx numeric,
+    address bytea,
     id bytea,
     name text,
     key_schema bytea,
     val_schema bytea,
     key_names text[],
     val_names text[],
-    primary key (id)
+    primary key (address, id)
 );
 
 create or replace function b2n(b bytea)
