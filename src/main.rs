@@ -14,7 +14,7 @@ use axum::{
 use clap::Parser;
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::WrapErr;
-use std::{str::FromStr, time::Duration};
+use std::{cmp::max, str::FromStr, time::Duration};
 use tokio;
 use tokio_postgres::NoTls;
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
@@ -139,15 +139,20 @@ async fn main() -> eyre::Result<()> {
     );
 
     tokio::spawn(async move {
+        //TODO: this is a workaround for the redstone RPC API not having a reliable
+        // block range limit for the eth_getLogs request.
+        const MAX_BATCH_SIZE: u64 = 1000;
+        let mut batch_size = MAX_BATCH_SIZE;
         loop {
-            match indexer::index(&eth_client, &mut w_pg).await {
-                Ok(_) => {}
+            match indexer::index(&eth_client, &mut w_pg, batch_size).await {
+                Ok(_) => batch_size = MAX_BATCH_SIZE,
                 Err(indexer::IndexError::Fatal(e)) => {
                     tracing::error!(%e, "An error occurred: {:?}", e);
                     std::process::exit(1);
                 }
                 Err(indexer::IndexError::Retry(e)) => {
-                    tracing::debug!("indexer retry: {:?}", e.to_string());
+                    batch_size = max(1, batch_size / 2);
+                    tracing::error!("indexer retry: {:?}", e.to_string());
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }

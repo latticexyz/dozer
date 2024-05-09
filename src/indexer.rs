@@ -165,6 +165,7 @@ impl EthApi for ReqwestProvider {
 async fn next_to_index<F: EthApi>(
     pgtx: &Transaction<'_>,
     remote: &F,
+    batch_size: u64,
     max_reorg: u64,
 ) -> eyre::Result<NextRange, IndexError> {
     let mut removed = 0;
@@ -187,7 +188,7 @@ async fn next_to_index<F: EthApi>(
                 local_num,
             )));
         }
-        let delta = cmp::min(remote_num - local_num, 100);
+        let delta = cmp::min(remote_num - local_num, batch_size);
         let (from, to) = (
             remote
                 .block(BlockNumberOrTag::Number(local_num + 1))
@@ -249,9 +250,13 @@ async fn next_to_index<F: EthApi>(
 }
 
 #[tracing::instrument(fields(from, to, n) skip_all)]
-pub async fn index<T: EthApi>(remote: &T, pg: &mut Client) -> eyre::Result<(), IndexError> {
+pub async fn index<T: EthApi>(
+    remote: &T,
+    pg: &mut Client,
+    batch_size: u64,
+) -> eyre::Result<(), IndexError> {
     let pgtx = pg.transaction().await.wrap_err("opening index tx")?;
-    let next = next_to_index(&pgtx, remote, 100).await?;
+    let next = next_to_index(&pgtx, remote, batch_size, 100).await?;
     pgtx.commit().await.wrap_err("unable to commit tx")?;
 
     let filter = Filter::new()
@@ -631,7 +636,7 @@ mod tests {
         let trg = TestGetRemote {
             0: test_block(10, 10, 9),
         };
-        let next_range = next_to_index(&pgtx, &trg, 1).await.unwrap();
+        let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
         assert_eq!(next_range.from.num, 1);
         assert_eq!(next_range.to.num, 10);
     }
@@ -677,7 +682,7 @@ mod tests {
         let trg = TestGetRemote {
             0: test_block(2, 2, 1),
         };
-        next_to_index(&pgtx, &trg, 2).await.unwrap();
+        next_to_index(&pgtx, &trg, 2, 2).await.unwrap();
 
         let rows = pgtx
             .query("select num, hash from blocks order by num desc", &[])
