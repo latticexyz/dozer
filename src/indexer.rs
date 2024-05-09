@@ -319,6 +319,7 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
                 );
                 if rec.table_id == TABLES_TABLE_ID {
                     let schema = &Schema::from_data(
+                        log_addr,
                         *rec.key_tuple.first().wrap_err("mising table_id from key")?,
                         &Data::new(
                             rec.encoded_lengths,
@@ -326,7 +327,7 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
                             rec.static_data.borrow(),
                         )?,
                     )?;
-                    schema.insert(tx, block_num, log_idx).await?
+                    schema.insert(tx, block_num, log_idx, log_addr).await?
                 }
             }
             &Store_SpliceDynamicData::SIGNATURE_HASH => {

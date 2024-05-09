@@ -80,6 +80,7 @@ mod tests {
         assert_eq!(
             pq.enhance(
                 &Schema {
+                    address: fixed_bytes!(),
                     table_id: fixed_bytes!("74620000000000000000000000000000436f756e746572000000000000000000"),
                     key_names: vec![],
                     val_names: vec![String::from("value")],
