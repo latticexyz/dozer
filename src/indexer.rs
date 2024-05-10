@@ -1,7 +1,5 @@
-use crate::schema::{Data, Schema};
-
 use alloy::{
-    primitives::{fixed_bytes, BlockHash, Bytes, FixedBytes},
+    primitives::{BlockHash, Bytes, FixedBytes},
     providers::{Provider, ReqwestProvider},
     rpc::types::eth::{Block, BlockNumberOrTag, Filter, Log},
     sol,
@@ -9,10 +7,15 @@ use alloy::{
 };
 use async_trait::async_trait;
 use eyre::{eyre, ContextCompat, WrapErr};
+use futures::pin_mut;
+use itertools::Itertools;
 use ruint::aliases::U64;
-use std::{borrow::Borrow, cmp};
-use tokio_postgres::{Client, Transaction};
-use tracing;
+use std::{
+    cmp,
+    collections::{HashMap, HashSet},
+    vec,
+};
+use tokio_postgres::{binary_copy::BinaryCopyInWriter, Client, Row, Transaction};
 
 sol! {
  type EncodedLengths is bytes32;
@@ -117,6 +120,7 @@ pub trait EthApi {
 #[async_trait]
 /// Wraps the alloy Result type with our internal error types
 impl EthApi for ReqwestProvider {
+    #[tracing::instrument(skip_all)]
     async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError> {
         self.get_block_by_number(n, false)
             .await
@@ -128,6 +132,7 @@ impl EthApi for ReqwestProvider {
     /// this function also does a basic validation step to ensure
     /// that the logs returned from the API are within the requested
     /// block range.
+    #[tracing::instrument(skip_all fields(logs))]
     async fn logs(&self, f: Filter) -> eyre::Result<Vec<Log>, IndexError> {
         let logs = self
             .get_logs(&f)
@@ -157,6 +162,7 @@ impl EthApi for ReqwestProvider {
                 }
             }
         }
+        tracing::Span::current().record("logs", logs.len());
         Ok(logs)
     }
 }
@@ -225,10 +231,19 @@ async fn next_to_index<F: EthApi>(
             .await?;
             pgtx.execute(
                 "
-                update records set expired_block_num = NULL, expired_log_idx = NULL
-                where expired_block_num >= $1
+                with latest as (
+                    select max(block_num) as block_num, address, table_id, key
+                    from records
+                    where expired
+                    and block_num >= $1
+                    group by address, table_id, key
+                )
+                update records r set expired = false
+                from latest
+                where (r.address, r.table_id, r.key) = (latest.address, latest.table_id, latest.key)
+                and r.block_num = latest.block_num
                 ",
-                &[&U64::from(local_num)],
+                &[&U64::from(cmp::max(local_num as i64 - max_reorg as i64, 0))],
             )
             .await?;
             removed += 1;
@@ -249,7 +264,7 @@ async fn next_to_index<F: EthApi>(
     return Err(IndexError::Fatal(eyre!("reorg too big")));
 }
 
-#[tracing::instrument(fields(from, to, n) skip_all)]
+#[tracing::instrument(fields(from, to, updates, records, updated) skip_all)]
 pub async fn index<T: EthApi>(
     remote: &T,
     pg: &mut Client,
@@ -267,16 +282,39 @@ pub async fn index<T: EthApi>(
             &Store_DeleteRecord::SIGNATURE,
         ])
         .select(next.from.num..next.to.num);
-    let mut logs = remote.logs(filter).await?;
-    logs.sort_by_key(|l| (l.block_number, l.log_index));
+    let updates: Vec<Update> = remote
+        .logs(filter)
+        .await?
+        .into_iter()
+        .map(Update::from_log)
+        .collect::<Result<Vec<Option<Update>>, IndexError>>()?
+        .into_iter()
+        .flatten()
+        .sorted_by_key(|u| (u.block_num, u.log_idx))
+        .collect::<Vec<_>>();
 
-    tracing::Span::current()
-        .record("from", next.from.num)
-        .record("to", next.to.num)
-        .record("n", logs.len());
+    let record_ids: HashSet<RecordId> = updates.iter().map(|u| u.id()).collect();
+    let (updates_count, records_count) = (updates.len(), record_ids.len());
 
     let tx = pg.transaction().await.wrap_err("opening index tx")?;
-    process_logs(&tx, logs).await.wrap_err("processing logs")?;
+    let mut records = Record::load(&tx, record_ids).await?;
+    let mut updated = HashSet::new();
+    updates.into_iter().for_each(|u| {
+        let id = u.id();
+        match records.get_mut(&id) {
+            Some(r) => {
+                updated.insert(id);
+                r.update(u);
+            }
+            None => {
+                let mut r = Record::default(id.clone());
+                r.update(u);
+                records.insert(id, r);
+            }
+        }
+    });
+    Record::expire(&tx, updated).await?;
+    Record::copy(&tx, records).await?;
     tx.execute(
         "insert into blocks(num, hash) values ($1, $2)",
         &[&U64::from(next.to.num), &next.to.hash],
@@ -284,13 +322,257 @@ pub async fn index<T: EthApi>(
     .await
     .wrap_err(format!("updating blocks table to latest {}", next.to.num))?;
     tx.commit().await.wrap_err("unable to commit tx")?;
+
+    tracing::Span::current()
+        .record("from", next.from.num)
+        .record("to", next.to.num)
+        .record("updates", updates_count)
+        .record("records", records_count);
     Ok(())
 }
 
-#[tracing::instrument(fields(n, skipped) skip_all)]
-async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> {
-    let (mut skipped, n) = (0, logs.len());
-    for log in logs {
+type RecordId = (FixedBytes<20>, FixedBytes<32>, Vec<u8>);
+
+struct Record {
+    block_num: U64,
+    log_idx: U64,
+    address: FixedBytes<20>,
+    table_id: FixedBytes<32>,
+    key: Vec<u8>,
+    static_data: Vec<u8>,
+    encoded_lengths: FixedBytes<32>,
+    dynamic_data: Vec<u8>,
+    deleted: bool,
+}
+
+impl Record {
+    fn id(&self) -> RecordId {
+        (self.address, self.table_id, self.key.clone())
+    }
+
+    fn default(id: RecordId) -> Self {
+        Record {
+            block_num: U64::from(0),
+            log_idx: U64::from(0),
+            address: id.0,
+            table_id: id.1,
+            key: id.2,
+            static_data: vec![],
+            encoded_lengths: FixedBytes::<32>::ZERO,
+            dynamic_data: vec![],
+            deleted: false,
+        }
+    }
+
+    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
+        Ok(Record {
+            block_num: row.try_get("block_num")?,
+            log_idx: row.try_get("log_idx")?,
+            address: row.try_get("address")?,
+            table_id: row.try_get("table_id")?,
+            key: row.try_get("key")?,
+            static_data: row.try_get("static_data")?,
+            encoded_lengths: row.try_get("encoded_lengths")?,
+            dynamic_data: row.try_get("dynamic_data")?,
+            deleted: row.try_get("deleted")?,
+        })
+    }
+
+    #[tracing::instrument(skip_all fields(records))]
+    async fn load(
+        tx: &Transaction<'_>,
+        recs: HashSet<RecordId>,
+    ) -> Result<HashMap<RecordId, Record>, IndexError> {
+        const Q: &str = "
+            with q as (
+                select
+                    unnest($1::bytea[]) address,
+                    unnest($2::bytea[]) table_id,
+                    unnest($3::bytea[]) key
+            )
+            select block_num, log_idx, r.address, r.table_id, r.key, static_data, encoded_lengths, dynamic_data, deleted
+            from records r
+            join q
+            on (r.address, r.table_id, r.key) =  (q.address, q.table_id, q.key)
+            and not r.expired
+        ";
+        let loaded_recs: Vec<Record> = tx
+            .query(
+                Q,
+                &[
+                    &recs.iter().map(|r| r.0).collect::<Vec<FixedBytes<20>>>(),
+                    &recs.iter().map(|r| r.1).collect::<Vec<FixedBytes<32>>>(),
+                    &recs.iter().map(|r| &r.2).collect::<Vec<&Vec<u8>>>(),
+                ],
+            )
+            .await?
+            .iter()
+            .map(Self::from_row)
+            .collect::<Result<Vec<Record>, _>>()?;
+        tracing::Span::current().record("records", loaded_recs.len());
+        Ok(loaded_recs.into_iter().map(|r| (r.id(), r)).collect())
+    }
+
+    #[tracing::instrument(skip_all fields(records))]
+    async fn expire(tx: &Transaction<'_>, recs: HashSet<RecordId>) -> Result<u64, IndexError> {
+        const Q: &str = r#"
+            with q as (
+                select
+                    unnest($1::bytea[]) as address,
+                    unnest($2::bytea[]) as table_id,
+                    unnest($3::bytea[]) as key
+            )
+            update records set expired = true
+            from q
+            where (records.address, records.table_id, records.key) = (q.address, q.table_id, q.key)
+            and not records.expired;
+        "#;
+        tx.execute(
+            Q,
+            &[
+                &recs.iter().map(|r| r.0).collect::<Vec<FixedBytes<20>>>(),
+                &recs.iter().map(|r| r.1).collect::<Vec<FixedBytes<32>>>(),
+                &recs.iter().map(|r| &r.2).collect::<Vec<&Vec<u8>>>(),
+            ],
+        )
+        .await
+        .map_err(|err| IndexError::Fatal(eyre!("error: {}", err)))
+        .inspect(|res| {
+            tracing::Span::current().record("records", res);
+        })
+    }
+
+    #[tracing::instrument(skip_all fields(records))]
+    async fn copy(tx: &Transaction<'_>, rec: HashMap<RecordId, Record>) -> Result<u64, IndexError> {
+        const Q: &str = r#"
+            copy records (
+                address,
+                table_id,
+                key,
+                static_data,
+                encoded_lengths,
+                dynamic_data,
+                block_num,
+                log_idx,
+                deleted
+            )
+            from stdin binary
+        "#;
+        let sink = tx.copy_in(Q).await.wrap_err("unable to start copy in")?;
+        let writer = BinaryCopyInWriter::new(
+            sink,
+            &[
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::BYTEA,
+                tokio_postgres::types::Type::NUMERIC,
+                tokio_postgres::types::Type::INT4,
+                tokio_postgres::types::Type::BOOL,
+            ],
+        );
+        pin_mut!(writer);
+        for r in rec.values() {
+            writer
+                .as_mut()
+                .write(&[
+                    &r.address,
+                    &r.table_id,
+                    &r.key,
+                    &r.static_data,
+                    &r.encoded_lengths,
+                    &r.dynamic_data,
+                    &r.block_num,
+                    &r.log_idx,
+                    &r.deleted,
+                ])
+                .await?;
+        }
+        writer
+            .finish()
+            .await
+            .map_err(|err| IndexError::Fatal(eyre!("error: {}", err)))
+            .inspect(|res| {
+                tracing::Span::current().record("records", res);
+            })
+    }
+
+    fn update(&mut self, u: Update) {
+        self.block_num = U64::from(u.block_num);
+        self.log_idx = U64::from(u.log_idx);
+        match u.kind {
+            UpdateKind::Del => self.deleted = true,
+            UpdateKind::Set {
+                static_data,
+                encoded_lengths,
+                dynamic_data,
+            } => {
+                self.deleted = false;
+                self.encoded_lengths = encoded_lengths;
+                self.static_data = static_data.to_vec();
+                self.dynamic_data = dynamic_data.to_vec();
+            }
+            UpdateKind::DSplice {
+                encoded_lengths,
+                start,
+                count,
+                data,
+            } => {
+                self.deleted = false;
+                self.encoded_lengths = encoded_lengths;
+                splice(
+                    &mut self.dynamic_data,
+                    start as usize,
+                    count as usize,
+                    &data,
+                );
+            }
+            UpdateKind::SSplice { start, data } => {
+                self.deleted = false;
+                splice(&mut self.static_data, start as usize, data.len(), &data);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum UpdateKind {
+    Del,
+    Set {
+        static_data: Bytes,
+        encoded_lengths: FixedBytes<32>,
+        dynamic_data: Bytes,
+    },
+    DSplice {
+        encoded_lengths: FixedBytes<32>,
+        start: u64,
+        count: u64,
+        data: Bytes,
+    },
+    SSplice {
+        start: u64,
+        data: Bytes,
+    },
+}
+
+#[derive(Debug)]
+struct Update {
+    block_num: u64,
+    log_idx: u64,
+    address: FixedBytes<20>,
+    table_id: FixedBytes<32>,
+    key: Vec<u8>,
+    kind: UpdateKind,
+}
+
+impl Update {
+    fn id(&self) -> RecordId {
+        (self.address, self.table_id, self.key.clone())
+    }
+
+    fn from_log(log: Log) -> Result<Option<Self>, IndexError> {
         let (block_num, log_addr, log_idx) = (
             log.block_number.wrap_err("missing block num from log")?,
             *log.address(),
@@ -300,249 +582,70 @@ async fn process_logs(tx: &Transaction<'_>, logs: Vec<Log>) -> eyre::Result<()> 
             &Store_SetRecord::SIGNATURE_HASH => {
                 let rec = Store_SetRecord::decode_log_data(log.data(), true)
                     .wrap_err("decoding set record")?;
-                expire_record(
-                    &tx,
-                    block_num,
-                    log_idx,
-                    log_addr,
-                    rec.table_id,
-                    &rec.key_tuple,
-                    false,
-                )
-                .await?;
-                set_record(
-                    &tx,
-                    log_addr,
-                    log.block_number.unwrap(),
-                    log.log_index.unwrap(),
-                    &rec,
-                )
-                .await?;
-
-                const TABLES_TABLE_ID: FixedBytes<32> = fixed_bytes!(
-                    "746273746f72650000000000000000005461626c657300000000000000000000"
-                );
-                if rec.table_id == TABLES_TABLE_ID {
-                    let schema = &Schema::from_data(
-                        log_addr,
-                        *rec.key_tuple.first().wrap_err("mising table_id from key")?,
-                        &Data::new(
-                            rec.encoded_lengths,
-                            rec.dynamic_data.borrow(),
-                            rec.static_data.borrow(),
-                        )?,
-                    )?;
-                    schema.insert(tx, block_num, log_idx, log_addr).await?
-                }
+                Ok(Some(Update {
+                    block_num: block_num,
+                    log_idx: log_idx,
+                    address: log_addr,
+                    table_id: rec.table_id,
+                    key: flatten_key(rec.key_tuple),
+                    kind: UpdateKind::Set {
+                        static_data: rec.static_data,
+                        encoded_lengths: rec.encoded_lengths,
+                        dynamic_data: rec.dynamic_data,
+                    },
+                }))
             }
             &Store_SpliceDynamicData::SIGNATURE_HASH => {
                 let rec = Store_SpliceDynamicData::decode_log_data(log.data(), true)
                     .wrap_err("decoding splice dynamic")?;
-                let new_rec = splice_dynamic(&tx, *log.address(), &rec).await?;
-                expire_record(
-                    &tx,
-                    block_num,
-                    log_idx,
-                    log_addr,
-                    rec.table_id,
-                    &rec.key_tuple,
-                    false,
-                )
-                .await?;
-                set_record(&tx, *log.address(), block_num, log_idx, &new_rec).await?;
+                Ok(Some(Update {
+                    block_num: block_num,
+                    log_idx: log_idx,
+                    address: log_addr,
+                    table_id: rec.table_id,
+                    key: flatten_key(rec.key_tuple),
+                    kind: UpdateKind::DSplice {
+                        encoded_lengths: rec.encoded_lengths,
+                        start: rec.start,
+                        count: rec.delete_count,
+                        data: rec.data,
+                    },
+                }))
             }
             &Store_SpliceStaticData::SIGNATURE_HASH => {
                 let rec = Store_SpliceStaticData::decode_log_data(log.data(), true)
                     .wrap_err("decoding splice static")?;
-                let new_rec = splice_static(&tx, log_addr, &rec).await?;
-                expire_record(
-                    &tx,
-                    block_num,
-                    log_idx,
-                    log_addr,
-                    rec.table_id,
-                    &rec.key_tuple,
-                    false,
-                )
-                .await?;
-                set_record(&tx, *log.address(), block_num, log_idx, &new_rec).await?
+                Ok(Some(Update {
+                    block_num: block_num,
+                    log_idx: log_idx,
+                    address: log_addr,
+                    table_id: rec.table_id,
+                    key: flatten_key(rec.key_tuple),
+                    kind: UpdateKind::SSplice {
+                        start: rec.start,
+                        data: rec.data,
+                    },
+                }))
             }
             &Store_DeleteRecord::SIGNATURE_HASH => {
                 let rec = Store_DeleteRecord::decode_log_data(log.data(), true)
                     .wrap_err("decoding delete record")?;
-                expire_record(
-                    &tx,
-                    block_num,
-                    log_idx,
-                    log_addr,
-                    rec.table_id,
-                    &rec.key_tuple,
-                    true,
-                )
-                .await?
+                Ok(Some(Update {
+                    block_num: block_num,
+                    log_idx: log_idx,
+                    address: log_addr,
+                    table_id: rec.table_id,
+                    key: flatten_key(rec.key_tuple),
+                    kind: UpdateKind::Del,
+                }))
             }
-            _ => skipped += 1,
+            _ => Ok(None),
         }
     }
-    tracing::Span::current()
-        .record("n", n)
-        .record("skipped", skipped);
-    Ok(())
 }
 
-#[tracing::instrument(level="debug" skip_all)]
-async fn set_record(
-    tx: &Transaction<'_>,
-    address: FixedBytes<20>,
-    block_num: u64,
-    log_idx: u64,
-    record: &Store_SetRecord,
-) -> eyre::Result<()> {
-    tx.execute(
-        "
-        insert into records(address, table_id, key, static_data, encoded_lengths, dynamic_data, block_num, log_idx)
-        values($1, $2, $3, $4, $5, $6, $7, $8)
-        ",
-        &[
-            &address,
-            &record.table_id,
-            &record.key_tuple,
-            &record.static_data.to_vec(),
-            &record.encoded_lengths,
-            &record.dynamic_data.to_vec(),
-            &U64::from(block_num),
-            &U64::from(log_idx),
-        ],
-    )
-    .await
-    .map(|_| ())
-    .wrap_err("inserting record")
-}
-
-#[tracing::instrument(level="debug" skip_all)]
-async fn expire_record(
-    tx: &Transaction<'_>,
-    block_num: u64,
-    log_idx: u64,
-    address: FixedBytes<20>,
-    table_id: FixedBytes<32>,
-    key: &Vec<FixedBytes<32>>,
-    deleted: bool,
-) -> eyre::Result<()> {
-    tx.execute(
-        "
-            update records
-            set expired_block_num =  $1, expired_log_idx=$2
-            where expired_block_num is null and expired_log_idx is null
-            and address = $3
-            and table_id = $4
-            and key = $5
-            and deleted = $6
-        ",
-        &[
-            &U64::from(block_num),
-            &U64::from(log_idx),
-            &address,
-            &table_id,
-            &key,
-            &deleted,
-        ],
-    )
-    .await
-    .map(|_| ())
-    .wrap_err("expiring record")
-}
-
-#[tracing::instrument(level="debug" skip_all)]
-async fn splice_static(
-    tx: &Transaction<'_>,
-    address: FixedBytes<20>,
-    record: &Store_SpliceStaticData,
-) -> eyre::Result<Store_SetRecord> {
-    let prev = tx
-        .query(
-            "
-            select static_data, encoded_lengths, dynamic_data
-            from records
-            where address = $1
-            and table_id = $2
-            and key = $3
-            and expired_block_num is null
-            and not deleted
-            ",
-            &[&address, &record.table_id, &record.key_tuple],
-        )
-        .await?;
-    let (mut sdata, dlen, ddata) = match prev.len() {
-        0 => (vec![], FixedBytes::new([0u8; 32]), vec![]),
-        1 => (
-            prev.first().unwrap().get("static_data"),
-            prev.first().unwrap().get("encoded_lengths"),
-            prev.first().unwrap().get("dynamic_data"),
-        ),
-        _ => {
-            return Err(eyre!("multiple previous records found"));
-        }
-    };
-    splice(
-        &mut sdata,
-        record.start as usize,
-        record.data.len(),
-        &record.data,
-    );
-    Ok(Store_SetRecord {
-        table_id: record.table_id,
-        key_tuple: record.key_tuple.clone(),
-        static_data: sdata.into(),
-        encoded_lengths: dlen,
-        dynamic_data: ddata.into(),
-    })
-}
-
-#[tracing::instrument(level="debug" skip_all)]
-async fn splice_dynamic(
-    tx: &Transaction<'_>,
-    address: FixedBytes<20>,
-    record: &Store_SpliceDynamicData,
-) -> eyre::Result<Store_SetRecord> {
-    let prev = tx
-        .query(
-            "
-            select static_data, dynamic_data
-            from records
-            where address = $1
-            and table_id = $2
-            and key = $3
-            and expired_block_num is null
-            and not deleted
-            ",
-            &[&address, &record.table_id, &record.key_tuple],
-        )
-        .await
-        .wrap_err("unable to find prev record to update")?;
-    let (sdata, mut ddata) = match prev.len() {
-        0 => (vec![], vec![]),
-        1 => (
-            prev.first().unwrap().get("static_data"),
-            prev.first().unwrap().get("dynamic_data"),
-        ),
-        _ => {
-            return Err(eyre!("multiple previous records found"));
-        }
-    };
-    splice(
-        &mut ddata,
-        record.start as usize,
-        record.delete_count as usize,
-        &record.data,
-    );
-    Ok(Store_SetRecord {
-        table_id: record.table_id,
-        key_tuple: record.key_tuple.clone(),
-        static_data: sdata.into(),
-        encoded_lengths: record.encoded_lengths.clone(),
-        dynamic_data: ddata.into(),
-    })
+fn flatten_key(key: Vec<FixedBytes<32>>) -> Vec<u8> {
+    key.into_iter().flat_map(|b| b.0.into_iter()).collect()
 }
 
 // removes n bytes from data starting at i (zero-based indexing)
@@ -671,8 +774,8 @@ mod tests {
 
         pgtx.execute(
             r#"
-            insert into records(address, table_id, key, block_num, log_idx, expired_block_num, expired_log_idx)
-            values ('\x01', '\x01', '{"\\x01"}', 0, 0, 1, 0), ('\x01', '\x01', '{"\\x01"}', 1, 0, NULL, NULL)
+            insert into records(address, table_id, key, block_num, log_idx, expired)
+            values ('\x01', '\x01', '\x01', 0, 0, true), ('\x01', '\x01', '\x01', 1, 0, false)
             "#,
             &[],
         )
@@ -695,14 +798,14 @@ mod tests {
         assert_eq!(got, vec![(U64::from(0), FixedBytes::<32>::ZERO)]);
 
         let rows = pgtx
-            .query("select block_num, expired_block_num from records", &[])
+            .query("select block_num, expired from records", &[])
             .await
             .expect("querying records table");
-        let mut got: Vec<(U64, Option<U64>)> = vec![];
+        let mut got: Vec<(U64, bool)> = vec![];
         for row in rows {
-            got.push((row.get("block_num"), row.get("expired_block_num")))
+            got.push((row.get("block_num"), row.get("expired")))
         }
-        assert_eq!(got, vec![(U64::from(0), None)]);
+        assert_eq!(got, vec![(U64::from(0), false)]);
     }
 
     #[test]

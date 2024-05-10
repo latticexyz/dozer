@@ -1,22 +1,19 @@
-create extension if not exists btree_gin;
-
 create table if not exists blocks (num numeric primary key, hash bytea, parent bytea);
 
 create table if not exists records(
     address bytea,
     table_id bytea,
-    key bytea[],
+    key bytea,
     static_data bytea,
     encoded_lengths bytea,
     dynamic_data bytea,
     block_num numeric,
-    log_idx numeric,
-    expired_block_num numeric,
-    expired_log_idx int,
-    deleted bool default false,
+    log_idx int,
+    expired bool default false not null,
+    deleted bool default false not null,
     primary key (address, table_id, key, block_num, log_idx)
 );
-create index if not exists "records_table_key" on records using gin(table_id, key);
+create unique index if not exists "records_not_expired" on records (address, table_id, key) where not expired;
 
 create table if not exists tables(
     block_num numeric,
@@ -49,8 +46,10 @@ $$ language plpgsql strict immutable;
 create or replace function sdec(data bytea, i int, n int)
 returns bytea as $$
 begin
-    if i + n - 1 > length(data) then
-        raise exception 'index out of bounds. position % plus length % exceeds total length %.', i, n, length(data);
+    if data is null then
+        return null;
+    elseif i + n - 1 > length(data) then
+        return null;
     end if;
     return substring(data from i+1 for n);  -- substring is 1-index
 end;

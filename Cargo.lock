@@ -1740,6 +1740,8 @@ dependencies = [
  "clap",
  "deadpool-postgres",
  "eyre",
+ "futures",
+ "itertools 0.12.1",
  "postgresql_embedded",
  "ruint",
  "serde",

@@ -2,15 +2,12 @@ use crate::api_error::ApiError;
 use crate::schema::Schema;
 use crate::sql::ParsedQuery;
 
-use alloy::{
-    hex,
-    primitives::{Bytes, FixedBytes},
-};
+use alloy::{hex, primitives::FixedBytes};
 use axum::{extract::Query, extract::State, http::StatusCode, Json};
 use deadpool_postgres::Pool;
 use eyre::{Context, Result};
 use ruint::aliases::{U256, U64};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use tokio_postgres::{
     types::{ToSql, Type},
@@ -92,49 +89,63 @@ pub struct LogsRequest {
     input: String,
 }
 
-#[derive(Serialize, Debug)]
-pub struct LogsResponseArg {
-    #[serde(rename = "tableId")]
-    table_id: FixedBytes<32>,
-    #[serde(rename = "keyTuple")]
-    key_tuple: Vec<FixedBytes<32>>,
-    #[serde(rename = "staticData")]
-    static_data: Bytes,
-    #[serde(rename = "encodedLengths")]
-    encoded_lengths: FixedBytes<32>,
-    #[serde(rename = "dynamicData")]
-    dynamic_data: Bytes,
+fn hb<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
 }
 
 #[derive(Serialize, Debug)]
-pub struct LogsResponse {
+pub struct LogArg {
+    #[serde(rename = "tableId")]
+    table_id: FixedBytes<32>,
+    #[serde(rename = "keyTuple", serialize_with = "hb")]
+    key_tuple: Vec<u8>,
+    #[serde(rename = "staticData", serialize_with = "hb")]
+    static_data: Vec<u8>,
+    #[serde(rename = "encodedLengths")]
+    encoded_lengths: FixedBytes<32>,
+    #[serde(rename = "dynamicData", serialize_with = "hb")]
+    dynamic_data: Vec<u8>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Log {
     address: FixedBytes<20>,
     #[serde(rename = "eventName")]
     event_name: String,
-    args: LogsResponseArg,
+    args: LogArg,
 }
 
-impl LogsResponse {
+impl Log {
     fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
-        Ok(LogsResponse {
+        Ok(Log {
             address: row.try_get("address")?,
             event_name: String::from("Store_SetRecord"),
-            args: LogsResponseArg {
+            args: LogArg {
                 table_id: row.try_get("table_id")?,
                 key_tuple: row.try_get("key")?,
-                static_data: Bytes::copy_from_slice(row.try_get("static_data")?),
+                static_data: row.try_get("static_data")?,
                 encoded_lengths: row.try_get("encoded_lengths")?,
-                dynamic_data: Bytes::copy_from_slice(row.try_get("dynamic_data")?),
+                dynamic_data: row.try_get("dynamic_data")?,
             },
         })
     }
 }
 
+#[derive(Serialize, Debug)]
+pub struct LogsResponse {
+    #[serde(rename = "blockNumber")]
+    block_num: String,
+    logs: Vec<Log>,
+}
+
 pub async fn logs(
     State(state): State<Config>,
     Query(query): Query<LogsRequest>,
-) -> Result<Json<Vec<LogsResponse>>, ApiError> {
-    let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
+) -> Result<Json<LogsResponse>, ApiError> {
+    let mut req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
     let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
     let q = format!(
         r#"
@@ -146,18 +157,21 @@ pub async fn logs(
             encoded_lengths,
             dynamic_data
         from records
-        where expired_block_num is null
+        where not expired
         and ({})
     "#,
         req_input.to_sql().unwrap(),
     );
-    let res: Vec<LogsResponse> = pg
-        .query(&q, &[])
+    let res: Vec<Log> = pg
+        .query(&dbg!(q), &[])
         .await?
         .iter()
-        .map(|r| LogsResponse::from_row(r))
+        .map(|r| Log::from_row(r))
         .collect::<Result<_, _>>()?;
-    Ok(Json(res))
+    Ok(Json(LogsResponse {
+        block_num: String::from("1"),
+        logs: res,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,10 +193,10 @@ impl LogsRequestFilter {
             stmts.push(format!(r#"table_id = '\x{}'"#, hex::encode(t)))
         }
         if let Some(k) = &self.key0 {
-            stmts.push(format!(r#"key[1] = '\x{}'"#, hex::encode(k)))
+            stmts.push(format!(r#"sdec(key, 0, 32) = '\x{}'"#, hex::encode(k)))
         }
         if let Some(k) = &self.key1 {
-            stmts.push(format!(r#"key[2] = '\x{}'"#, hex::encode(k)))
+            stmts.push(format!(r#"sdec(key, 32, 32) = '\x{}'"#, hex::encode(k)))
         }
         if stmts.len() > 0 {
             Some(format!("({})", stmts.join(" and ")))
@@ -195,14 +209,19 @@ impl LogsRequestFilter {
 #[derive(Debug, Deserialize)]
 struct LogsRequestInput {
     #[serde(rename = "chainId")]
-    pub chain_id: Option<u64>,
+    pub _chain_id: Option<u64>,
     pub address: Option<FixedBytes<20>>,
     pub filters: Option<Vec<LogsRequestFilter>>,
 }
 
 impl LogsRequestInput {
-    pub fn to_sql(&self) -> Option<String> {
-        if let Some(filters) = &self.filters {
+    pub fn to_sql(&mut self) -> Option<String> {
+        if let Some(filters) = &mut self.filters {
+            if let Some(address) = &self.address {
+                filters
+                    .iter_mut()
+                    .for_each(|f| f.address = Some(address.clone()))
+            }
             Some(
                 filters
                     .iter()
@@ -242,12 +261,12 @@ mod tests {
         );
         filter.key0 = Some(FixedBytes::<32>::with_last_byte(1));
         assert_eq!(
-            r#"(address = '\x0000000000000000000000000000000000000001' and table_id = '\x0000000000000000000000000000000000000000000000000000000000000001' and key[1] = '\x0000000000000000000000000000000000000000000000000000000000000001')"#,
+            r#"(address = '\x0000000000000000000000000000000000000001' and table_id = '\x0000000000000000000000000000000000000000000000000000000000000001' and sdec(key, 0, 32) = '\x0000000000000000000000000000000000000000000000000000000000000001')"#,
             filter.to_sql().unwrap()
         );
         filter.key1 = Some(FixedBytes::<32>::with_last_byte(2));
         assert_eq!(
-            r#"(address = '\x0000000000000000000000000000000000000001' and table_id = '\x0000000000000000000000000000000000000000000000000000000000000001' and key[1] = '\x0000000000000000000000000000000000000000000000000000000000000001' and key[2] = '\x0000000000000000000000000000000000000000000000000000000000000002')"#,
+            r#"(address = '\x0000000000000000000000000000000000000001' and table_id = '\x0000000000000000000000000000000000000000000000000000000000000001' and sdec(key, 0, 32) = '\x0000000000000000000000000000000000000000000000000000000000000001' and sdec(key, 32, 32) = '\x0000000000000000000000000000000000000000000000000000000000000002')"#,
             filter.to_sql().unwrap()
         );
     }
