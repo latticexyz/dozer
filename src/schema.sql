@@ -1,3 +1,15 @@
+create or replace function sdec(data bytea, i int, n int)
+returns bytea as $$
+begin
+    if data is null then
+        return null;
+    elseif i + n - 1 > length(data) then
+        return null;
+    end if;
+    return substring(data from i+1 for n);  -- substring is 1-index
+end;
+$$ language plpgsql strict immutable;
+
 create table if not exists blocks (num numeric primary key, hash bytea, parent bytea);
 
 create table if not exists records(
@@ -14,6 +26,9 @@ create table if not exists records(
     primary key (address, table_id, key, block_num, log_idx)
 );
 create unique index if not exists "records_not_expired" on records (address, table_id, key) where not expired;
+create index if not exists "records_address" on records(address) where not expired;
+create index if not exists "records_key_0" on records(sdec(key, 0, 32)) where not expired;
+create index if not exists "records_key_1" on records(sdec(key, 32, 32)) where not expired;
 
 create table if not exists tables(
     block_num numeric,
@@ -40,18 +55,6 @@ begin
         n:= n * 256 + get_byte(b, i - 1); -- Shift left by 8 bits and add current byte directly
     end loop;
     return n;
-end;
-$$ language plpgsql strict immutable;
-
-create or replace function sdec(data bytea, i int, n int)
-returns bytea as $$
-begin
-    if data is null then
-        return null;
-    elseif i + n - 1 > length(data) then
-        return null;
-    end if;
-    return substring(data from i+1 for n);  -- substring is 1-index
 end;
 $$ language plpgsql strict immutable;
 
