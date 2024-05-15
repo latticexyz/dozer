@@ -172,7 +172,7 @@ async fn main() -> eyre::Result<()> {
                         },
                     ),
             ),
-        tokio::net::TcpListener::bind("localhost:8000")
+        tokio::net::TcpListener::bind("0.0.0.0:8000")
             .await
             .expect("binding to tcp for http server"),
     );
