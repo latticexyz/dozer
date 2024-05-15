@@ -19,10 +19,12 @@
     async-trait = "0.1"
     axum = "0.7.5"
     clap = { version = "4.5.4", features = ["derive"] }
-    deadpool-postgres = "0.13.0"
+    deadpool-postgres = "0.13.2"
     eyre = "0.6.12"
     futures = "0.3"
     itertools = "0.12"
+    openssl = "0.10.64"
+    "postgres-openssl" = "0.5"
     ruint = { version = "1.12.1", features = ["postgres"] }
     serde = { version = "1", features = ["derive"] }
     serde_json = { versoin = "1" }

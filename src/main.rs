@@ -14,9 +14,11 @@ use axum::{
 use clap::Parser;
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::WrapErr;
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use postgres_openssl::MakeTlsConnector;
 use std::{cmp::max, str::FromStr, time::Duration};
 use tokio;
-use tokio_postgres::NoTls;
+use tokio_postgres::{Client, NoTls};
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing;
 use tracing_subscriber::FmtSubscriber;
@@ -63,17 +65,53 @@ impl Args {
 fn api_ro_pg(cstr: &str) -> Pool {
     let mut pg_config = tokio_postgres::Config::from_str(cstr).expect("unable to connect to ro pg");
     pg_config.user("uapi");
-    let pg_mgr = Manager::from_config(
-        pg_config,
-        NoTls,
-        ManagerConfig {
-            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-        },
-    );
+    let pg_mgr = if cstr.contains("sslmode") {
+        let mut builder = SslConnector::builder(SslMethod::tls()).expect("Error creating builder.");
+        builder.set_verify(SslVerifyMode::NONE);
+        let connector = MakeTlsConnector::new(builder.build());
+        Manager::from_config(
+            pg_config,
+            connector,
+            ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        )
+    } else {
+        Manager::from_config(
+            pg_config,
+            NoTls,
+            ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        )
+    };
     Pool::builder(pg_mgr)
         .max_size(16)
         .build()
         .expect("unable to build new ro pool")
+}
+
+async fn pg_tls_connect(url: &str) -> Result<Client, tokio_postgres::Error> {
+    let mut builder = SslConnector::builder(SslMethod::tls()).expect("Error creating builder.");
+    builder.set_verify(SslVerifyMode::NONE);
+    let connector = MakeTlsConnector::new(builder.build());
+    let (client, conn) = tokio_postgres::connect(url, connector).await?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            panic!("database writer error: {}", e)
+        }
+    });
+    Ok(client)
+}
+
+async fn pg_connect(url: &str) -> Result<Client, tokio_postgres::Error> {
+    let (client, conn) = tokio_postgres::connect(url, NoTls).await?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            panic!("database writer error: {}", e)
+        }
+    });
+    Ok(client)
 }
 
 #[tokio::main]
@@ -87,12 +125,13 @@ async fn main() -> eyre::Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let args = Args::parse();
-    let (mut w_pg, w_conn) = tokio_postgres::connect(&args.pg_url(), NoTls).await?;
-    tokio::spawn(async move {
-        if let Err(e) = w_conn.await {
-            panic!("database writer error: {}", e)
-        }
-    });
+
+    let mut w_pg = if args.pg_url().contains("sslmode") {
+        pg_tls_connect(&args.pg_url()).await?
+    } else {
+        pg_connect(&args.pg_url()).await?
+    };
+
     let eth_client = ProviderBuilder::new()
         .on_http(args.eth_url())
         .expect("unable to build eth client");
