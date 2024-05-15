@@ -33,9 +33,24 @@ struct Args {
 
     #[arg(short, long)]
     eth_url: Option<String>,
+
+    #[arg(short, long)]
+    ro_password: Option<String>,
 }
 
 impl Args {
+    fn ro_password(&self) -> String {
+        match &self.ro_password {
+            Some(s) => s.clone(),
+            None => {
+                if let Ok(s) = std::env::var("RO_PASSWORD") {
+                    s
+                } else {
+                    String::new()
+                }
+            }
+        }
+    }
     fn pg_url(&self) -> String {
         match &self.pg_url {
             Some(u) => u.clone(),
@@ -62,9 +77,10 @@ impl Args {
     }
 }
 
-fn api_ro_pg(cstr: &str) -> Pool {
+fn api_ro_pg(cstr: &str, ro_password: &str) -> Pool {
     let mut pg_config = tokio_postgres::Config::from_str(cstr).expect("unable to connect to ro pg");
     pg_config.user("uapi");
+    pg_config.password(ro_password);
     let pg_mgr = if cstr.contains("sslmode") {
         let mut builder = SslConnector::builder(SslMethod::tls()).expect("Error creating builder.");
         builder.set_verify(SslVerifyMode::NONE);
@@ -141,7 +157,7 @@ async fn main() -> eyre::Result<()> {
     }
 
     let config = api::Config {
-        pool: api_ro_pg(&args.pg_url()),
+        pool: api_ro_pg(&args.pg_url(), &args.ro_password()),
     };
 
     let (app, listener) = (
