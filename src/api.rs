@@ -2,7 +2,10 @@ use crate::api_error::ApiError;
 use crate::schema::Schema;
 use crate::sql::ParsedQuery;
 
-use alloy::{hex, primitives::FixedBytes};
+use alloy::{
+    hex,
+    primitives::{fixed_bytes, FixedBytes},
+};
 use axum::{extract::Query, extract::State, http::StatusCode, Json};
 use deadpool_postgres::Pool;
 use eyre::{Context, Result};
@@ -159,6 +162,7 @@ pub async fn logs(
         from records
         where not expired
         and ({})
+        order by block_num, log_idx asc
     "#,
         req_input.to_sql().unwrap(),
     );
@@ -217,6 +221,14 @@ struct LogsRequestInput {
 impl LogsRequestInput {
     pub fn to_sql(&mut self) -> Option<String> {
         if let Some(filters) = &mut self.filters {
+            filters.push(LogsRequestFilter {
+                address: None,
+                table_id: Some(fixed_bytes!(
+                    "746273746f72650000000000000000005461626c657300000000000000000000"
+                )),
+                key0: None,
+                key1: None,
+            });
             if let Some(address) = &self.address {
                 filters
                     .iter_mut()

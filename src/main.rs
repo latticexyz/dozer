@@ -165,7 +165,7 @@ async fn main() -> eyre::Result<()> {
 
     tokio::spawn(async move {
         //TODO: this is a workaround for the redstone RPC API not having a reliable
-        // block range limit for the eth_getLogs request.
+        //block range limit for the eth_getLogs request.
         const MAX_BATCH_SIZE: u64 = 1000;
         let mut batch_size = MAX_BATCH_SIZE;
         loop {
