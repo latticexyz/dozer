@@ -153,26 +153,18 @@ pub async fn logs(
     State(state): State<Config>,
     Query(query): Query<LogsRequest>,
 ) -> Result<Json<LogsResponse>, ApiError> {
-    let mut req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
+    let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
+    let query = LogsQuery::new(req_input);
+
+    let params: &[&(dyn ToSql + Sync)] = &query
+        .params
+        .iter()
+        .map(|b| b.as_ref() as &(dyn ToSql + Sync))
+        .collect::<Vec<_>>()[..];
+
     let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
-    let q = format!(
-        r#"
-        select
-            address,
-            table_id,
-            key,
-            static_data,
-            encoded_lengths,
-            dynamic_data
-        from records
-        where not expired
-        and ({})
-        order by block_num, log_idx asc
-    "#,
-        req_input.to_sql().unwrap(),
-    );
     let res: Vec<Log> = pg
-        .query(&dbg!(q), &[])
+        .query(&query.to_sql(), params)
         .await?
         .iter()
         .map(|r| Log::from_row(r))
@@ -188,34 +180,10 @@ pub async fn logs(
 
 #[derive(Debug, Deserialize)]
 struct LogsRequestFilter {
-    address: Option<FixedBytes<20>>,
     #[serde(rename = "tableId")]
     table_id: Option<FixedBytes<32>>,
     key0: Option<FixedBytes<32>>,
     key1: Option<FixedBytes<32>>,
-}
-
-impl LogsRequestFilter {
-    pub fn to_sql(&self) -> Option<String> {
-        let mut stmts = Vec::new();
-        if let Some(a) = self.address {
-            stmts.push(format!(r#"address = '\x{}'"#, hex::encode(a)))
-        }
-        if let Some(t) = self.table_id {
-            stmts.push(format!(r#"table_id = '\x{}'"#, hex::encode(t)))
-        }
-        if let Some(k) = &self.key0 {
-            stmts.push(format!(r#"sdec(key, 0, 32) = '\x{}'"#, hex::encode(k)))
-        }
-        if let Some(k) = &self.key1 {
-            stmts.push(format!(r#"sdec(key, 32, 32) = '\x{}'"#, hex::encode(k)))
-        }
-        if stmts.len() > 0 {
-            Some(format!("({})", stmts.join(" and ")))
-        } else {
-            None
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,68 +194,111 @@ struct LogsRequestInput {
     pub filters: Option<Vec<LogsRequestFilter>>,
 }
 
-impl LogsRequestInput {
-    pub fn to_sql(&mut self) -> Option<String> {
-        if let Some(filters) = &mut self.filters {
+type Param = (dyn ToSql + Sync + Send);
+
+#[derive(Default, Debug)]
+struct LogsQuery {
+    or_predicates: Vec<String>,
+    and_predicates: Vec<String>,
+    num_params: i32,
+    params: Vec<Box<Param>>,
+}
+
+impl LogsQuery {
+    fn new(input: LogsRequestInput) -> Self {
+        let mut query = LogsQuery {
+            num_params: 0,
+            and_predicates: vec![],
+            or_predicates: vec![],
+            params: vec![],
+        };
+        if input.address.is_some() {
+            query.num_params += 1;
+            query.params.push(Box::new(input.address))
+        }
+        if let Some(mut filters) = input.filters {
             filters.push(LogsRequestFilter {
-                address: None,
                 table_id: Some(fixed_bytes!(
                     "746273746f72650000000000000000005461626c657300000000000000000000"
                 )),
                 key0: None,
                 key1: None,
             });
-            if let Some(address) = &self.address {
-                filters
-                    .iter_mut()
-                    .for_each(|f| f.address = Some(address.clone()))
-            }
-            Some(
-                filters
-                    .iter()
-                    .filter_map(|f| f.to_sql())
-                    .collect::<Vec<String>>()
-                    .join(" or "),
-            )
-        } else if let Some(address) = &self.address {
-            Some(format!(r#"address='\x{}'"#, hex::encode(address)))
-        } else {
-            None
+            filters.iter().for_each(|f| {
+                if f.table_id.is_some() {
+                    query.add_filter_field("table_id", Box::new(f.table_id));
+                }
+                if f.key0.is_some() {
+                    query.add_filter_field("sdec(key, 0, 32)", Box::new(f.key0))
+                }
+                if f.key1.is_some() {
+                    query.add_filter_field("sdec(key, 32, 32)", Box::new(f.key1))
+                }
+                query.add_filter();
+            });
         }
+        query
+    }
+
+    fn add_filter_field(&mut self, field: &str, param: Box<Param>) {
+        self.params.push(param);
+        self.num_params += 1;
+        self.and_predicates.push(String::from(&format!(
+            "{} = ${}",
+            field,
+            self.num_params.to_string()
+        )));
+    }
+
+    fn add_filter(&mut self) {
+        self.or_predicates
+            .push(format!("({})", self.and_predicates.join(" and ")));
+        self.and_predicates.clear();
+    }
+
+    fn to_sql(&self) -> String {
+        format!(
+            "
+            select
+                address,
+                table_id,
+                key,
+                static_data,
+                encoded_lengths,
+                dynamic_data
+            from records
+            where not expired
+            and not deleted
+            and address = $1
+            and ({})
+            ",
+            self.or_predicates.join(" or ")
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn test_filter_sql() {
-        let mut filter = LogsRequestFilter {
-            table_id: None,
-            address: None,
-            key0: None,
-            key1: None,
-        };
-        assert_eq!(None, filter.to_sql());
-        filter.table_id = Some(FixedBytes::<32>::with_last_byte(1));
+    fn test_logs_query() {
+        let query = LogsQuery::new(LogsRequestInput {
+            _chain_id: Some(690),
+            address: Some(FixedBytes::<20>::with_last_byte(1)),
+            filters: Some(vec![LogsRequestFilter {
+                table_id: Some(FixedBytes::<32>::with_last_byte(1)),
+                key0: Some(FixedBytes::<32>::with_last_byte(1)),
+                key1: Some(FixedBytes::<32>::with_last_byte(1)),
+            }]),
+        });
+        assert_eq!(query.params.len(), 5);
         assert_eq!(
-            r#"(table_id = '\x0000000000000000000000000000000000000000000000000000000000000001')"#,
-            filter.to_sql().unwrap()
-        );
-        filter.address = Some(FixedBytes::<20>::with_last_byte(1));
-        assert_eq!(
-            r#"(address = '\x0000000000000000000000000000000000000001' and table_id = '\x0000000000000000000000000000000000000000000000000000000000000001')"#,
-            filter.to_sql().unwrap()
-        );
-        filter.key0 = Some(FixedBytes::<32>::with_last_byte(1));
-        assert_eq!(
-            r#"(address = '\x0000000000000000000000000000000000000001' and table_id = '\x0000000000000000000000000000000000000000000000000000000000000001' and sdec(key, 0, 32) = '\x0000000000000000000000000000000000000000000000000000000000000001')"#,
-            filter.to_sql().unwrap()
-        );
-        filter.key1 = Some(FixedBytes::<32>::with_last_byte(2));
-        assert_eq!(
-            r#"(address = '\x0000000000000000000000000000000000000001' and table_id = '\x0000000000000000000000000000000000000000000000000000000000000001' and sdec(key, 0, 32) = '\x0000000000000000000000000000000000000000000000000000000000000001' and sdec(key, 32, 32) = '\x0000000000000000000000000000000000000000000000000000000000000002')"#,
-            filter.to_sql().unwrap()
+            query.or_predicates,
+            vec![
+                "(table_id = $2 and sdec(key, 0, 32) = $3 and sdec(key, 32, 32) = $4)",
+                "(table_id = $5)"
+            ]
         );
     }
 }

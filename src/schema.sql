@@ -26,9 +26,13 @@ create table if not exists records(
     primary key (address, table_id, key, block_num, log_idx)
 );
 create unique index if not exists "records_not_expired" on records (address, table_id, key) where not expired;
-create index if not exists "records_address" on records(address) where not expired;
-create index if not exists "records_key_0" on records(sdec(key, 0, 32)) where not expired;
-create index if not exists "records_key_1" on records(sdec(key, 32, 32)) where not expired;
+
+create index if not exists "records_all"
+on records(address, table_id, sdec(key, 0, 32), sdec(key, 32, 32))
+where not expired and not deleted;
+
+create index if not exists "records_key_0" on records(sdec(key, 0, 32)) where not expired and not deleted;
+create index if not exists "records_key_1" on records(sdec(key, 32, 32)) where not expired and not deleted;
 
 create table if not exists tables(
     block_num numeric,
