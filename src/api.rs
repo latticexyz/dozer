@@ -177,8 +177,11 @@ pub async fn logs(
         .iter()
         .map(|r| Log::from_row(r))
         .collect::<Result<_, _>>()?;
+    let bres = pg
+        .query_one("select max(num)::text from blocks", &[])
+        .await?;
     Ok(Json(LogsResponse {
-        block_num: String::from("1"),
+        block_num: bres.get(0),
         logs: res,
     }))
 }
