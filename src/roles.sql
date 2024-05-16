@@ -11,6 +11,7 @@ revoke execute on all functions in schema public from uapi;
 
 grant select on records TO uapi;
 grant select on tables TO uapi;
+grant select on blocks TO uapi;
 
 alter role uapi set statement_timeout = '30s';
 alter role uapi set work_mem = '1GB';
