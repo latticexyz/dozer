@@ -103,8 +103,8 @@ where
 pub struct LogArg {
     #[serde(rename = "tableId")]
     table_id: FixedBytes<32>,
-    #[serde(rename = "keyTuple", serialize_with = "hb")]
-    key_tuple: Vec<u8>,
+    #[serde(rename = "keyTuple")]
+    key_tuple: Vec<FixedBytes<32>>,
     #[serde(rename = "staticData", serialize_with = "hb")]
     static_data: Vec<u8>,
     #[serde(rename = "encodedLengths")]
@@ -123,12 +123,17 @@ pub struct Log {
 
 impl Log {
     fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
+        let key: Vec<u8> = row.try_get("key")?;
+        let key: Vec<FixedBytes<32>> = key
+            .chunks(32)
+            .map(|chunk| FixedBytes::<32>::from_slice(chunk))
+            .collect();
         Ok(Log {
             address: row.try_get("address")?,
             event_name: String::from("Store_SetRecord"),
             args: LogArg {
                 table_id: row.try_get("table_id")?,
-                key_tuple: row.try_get("key")?,
+                key_tuple: key,
                 static_data: row.try_get("static_data")?,
                 encoded_lengths: row.try_get("encoded_lengths")?,
                 dynamic_data: row.try_get("dynamic_data")?,
