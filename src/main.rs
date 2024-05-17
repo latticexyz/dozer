@@ -38,6 +38,9 @@ struct Args {
 
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_index: bool,
+
+    #[clap(short, long, default_value = "0.0.0.0:8000")]
+    listen: String,
 }
 
 impl Args {
@@ -161,7 +164,7 @@ async fn main() -> eyre::Result<()> {
                         },
                     ),
             ),
-        tokio::net::TcpListener::bind("0.0.0.0:8000")
+        tokio::net::TcpListener::bind(args.listen)
             .await
             .expect("binding to tcp for http server"),
     );
@@ -169,6 +172,10 @@ async fn main() -> eyre::Result<()> {
     tokio::spawn(async move {
         if args.no_index {
             println!("indexing disabled");
+            return;
+        }
+        if let Err(err) = w_pg.query("select pg_advisory_lock(1)", &[]).await {
+            println!("unable lock for indexing: {}", err);
             return;
         }
         //TODO: this is a workaround for the redstone RPC API not having a reliable
