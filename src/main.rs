@@ -35,6 +35,9 @@ struct Args {
 
     #[arg(short, long)]
     ro_password: Option<String>,
+
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_index: bool,
 }
 
 impl Args {
@@ -164,6 +167,10 @@ async fn main() -> eyre::Result<()> {
     );
 
     tokio::spawn(async move {
+        if args.no_index {
+            println!("indexing disabled");
+            return;
+        }
         //TODO: this is a workaround for the redstone RPC API not having a reliable
         //block range limit for the eth_getLogs request.
         const MAX_BATCH_SIZE: u64 = 1000;
