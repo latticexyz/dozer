@@ -12,15 +12,16 @@ x http server timeouts
 x save new mud tables to pg
 x eth url and db url from flags
 x ci tests. include pg for no-dep testing
-- add decoded records query api
-- add api specs to readme
+x add decoded records query api
+x perf test on large response sizes
+x review potential for batching rpc / pg ops
+x pg query timeout
+x pg tls connection
+x add api specs to readme
+
 - add point-in-time records query
-- perf test on large response sizes
 - control reset start point from flags
 - advisory lock for ensuring 1 indexer
-- review potential for batching rpc / pg ops
 - rpc client timeouts
-- pg query timeout
-- pg tls connection
 - http rate limiter
 - integration test that hits real endpoints with stable data
