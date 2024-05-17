@@ -82,6 +82,20 @@ Configuration is first read by the command flag. If it is missing, it
 is read from the os environment. If it is still missing a compiled
 deafult is used.
 
+### Indexing
+
+flag: `--no-index`
+
+default: `false`
+
+Set this if you would like to run API only and disable indexing.
+
+### HTTP API
+
+flag: `-l, --listen <address:port>`
+
+default: `0.0.0.0:8000`
+
 ### Ethereum
 
 flag: `-e, --eth-url <ETH_URL>`

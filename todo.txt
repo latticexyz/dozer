@@ -18,10 +18,10 @@ x review potential for batching rpc / pg ops
 x pg query timeout
 x pg tls connection
 x add api specs to readme
+x advisory lock for ensuring 1 indexer
 
 - add point-in-time records query
 - control reset start point from flags
-- advisory lock for ensuring 1 indexer
 - rpc client timeouts
 - http rate limiter
 - integration test that hits real endpoints with stable data
