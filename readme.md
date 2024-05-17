@@ -29,7 +29,6 @@ Where `input` is a percent encoded JSON object with the following fields:
     "address": "",
     "filter": [
         {
-            "address": "",
             "tableId": "",
             "key0": "",
             "key1": "",
@@ -38,12 +37,17 @@ Where `input` is a percent encoded JSON object with the following fields:
 }
 ```
 
-- If an `input.filter` is provided then `input.address` is ignored.
 - An `input.filter` must have `tableId`
-- An `input.filter` may have `address`, `key0`, or `key1`
+- An `input.filter` may have `key0` or `key1`
 
 #### Response
 
+- If the request has at least 1 filter then the response contains all records
+  for the Tables table
+- If the request contains an address then all records are associated with the
+  address
+- If the request contains filters, then each returned record matches at least
+  one of the filters for all specified fileds within the filter.
 - Returns (404, "no logs found") when no logs are found in db
 - Returns (200, json_resp) when logs are found
 
@@ -162,7 +166,3 @@ log and in this case we do not carry forward the previous static_data,
 dynamic_lengths, or dynamic_data.
 
 Many logs for a particular table_id/key may exist within a block.
-
-```
-
-```
