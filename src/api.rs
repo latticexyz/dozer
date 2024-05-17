@@ -4,13 +4,13 @@ use crate::sql::ParsedQuery;
 
 use alloy::{
     hex,
-    primitives::{fixed_bytes, FixedBytes},
+    primitives::{fixed_bytes, Bytes, FixedBytes},
 };
 use axum::{extract::Query, extract::State, http::StatusCode, Json};
 use deadpool_postgres::Pool;
 use eyre::{Context, Result};
 use ruint::aliases::{U256, U64};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_postgres::{
     types::{ToSql, Type},
@@ -92,25 +92,18 @@ pub struct LogsRequest {
     input: String,
 }
 
-fn hb<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
-}
-
 #[derive(Serialize, Debug)]
 pub struct LogArg {
     #[serde(rename = "tableId")]
     table_id: FixedBytes<32>,
     #[serde(rename = "keyTuple")]
     key_tuple: Vec<FixedBytes<32>>,
-    #[serde(rename = "staticData", serialize_with = "hb")]
-    static_data: Vec<u8>,
+    #[serde(rename = "staticData")]
+    static_data: Bytes,
     #[serde(rename = "encodedLengths")]
     encoded_lengths: FixedBytes<32>,
-    #[serde(rename = "dynamicData", serialize_with = "hb")]
-    dynamic_data: Vec<u8>,
+    #[serde(rename = "dynamicData")]
+    dynamic_data: Bytes,
 }
 
 #[derive(Serialize, Debug)]
@@ -134,9 +127,9 @@ impl Log {
             args: LogArg {
                 table_id: row.try_get("table_id")?,
                 key_tuple: key,
-                static_data: row.try_get("static_data")?,
+                static_data: Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?),
                 encoded_lengths: row.try_get("encoded_lengths")?,
-                dynamic_data: row.try_get("dynamic_data")?,
+                dynamic_data: Bytes::from(row.try_get::<&str, Vec<u8>>("dynamic_data")?),
             },
         })
     }
