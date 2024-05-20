@@ -1,3 +1,5 @@
+create extension if not exists pg_stat_statements;
+
 create or replace function sdec(data bytea, i int, n int)
 returns bytea as $$
 begin
