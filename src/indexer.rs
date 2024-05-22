@@ -723,11 +723,11 @@ mod tests {
         let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
         db.setup().await.expect("setting up pg");
         db.start().await.expect("starting pg");
-        db.create_database("imud-test")
+        db.create_database("dozer-test")
             .await
             .expect("creating test db");
 
-        let mut pg = test_pg(&db.settings().url("imud-test")).await;
+        let mut pg = test_pg(&db.settings().url("dozer-test")).await;
         let pgtx = pg.transaction().await.expect("opening index tx");
         pgtx.execute(
             "insert into blocks(num, hash) values ($1, $2)",
@@ -750,11 +750,11 @@ mod tests {
         let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
         db.setup().await.expect("setting up pg");
         db.start().await.expect("starting pg");
-        db.create_database("imud-test")
+        db.create_database("dozer-test")
             .await
             .expect("creating test db");
 
-        let mut pg = test_pg(&db.settings().url("imud-test")).await;
+        let mut pg = test_pg(&db.settings().url("dozer-test")).await;
 
         let pgtx = pg.transaction().await.expect("opening index tx");
 

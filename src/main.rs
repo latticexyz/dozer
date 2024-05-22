@@ -67,7 +67,7 @@ impl Args {
                 if let Ok(u) = std::env::var("PG_URL") {
                     u
                 } else {
-                    String::from("postgres://localhost/imud")
+                    String::from("postgres://localhost/dozer")
                 }
             }
         }

@@ -1190,6 +1190,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "dozer"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "async-trait",
+ "axum",
+ "clap",
+ "deadpool-postgres",
+ "eyre",
+ "futures",
+ "itertools 0.12.1",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "metrics-tracing-context",
+ "metrics-util",
+ "openssl",
+ "postgres-openssl",
+ "postgresql_embedded",
+ "ruint",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tokio",
+ "tokio-postgres",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1774,40 +1808,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "imud"
-version = "0.1.0"
-dependencies = [
- "alloy",
- "async-trait",
- "axum",
- "clap",
- "deadpool-postgres",
- "eyre",
- "futures",
- "itertools 0.12.1",
- "metrics",
- "metrics-exporter-prometheus",
- "metrics-tracing-context",
- "metrics-util",
- "openssl",
- "postgres-openssl",
- "postgresql_embedded",
- "ruint",
- "serde",
- "serde_json",
- "sqlparser",
- "tokio",
- "tokio-postgres",
- "tokio-stream",
- "tower",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "url",
 ]
 
 [[package]]

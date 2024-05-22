@@ -1,11 +1,13 @@
-# indexer for mud
+# Dozer: an indexer for MUD
+
+<img src="https://github.com/latticexyz/dozer/blob/master/dozer.png?raw=true" width=200px />
 
 - [Logs API](#logs-api)
 - [Config](#config)
 - [Data Model](#data-model)
 
-imud downloads MUD Store logs from an eth rpc get_logs api and saves
-the data into a Postgres table named records. imud provides a JSON
+Dozer downloads MUD Store logs from an eth rpc get_logs api and saves
+the data into a Postgres table named records. Dozer provides a JSON
 HTTP API that allows users to request complete records by table_id,
 key_tuple, and block number. The block number in the request enables
 point-in-time queries.
@@ -112,11 +114,11 @@ flag: `-p, --pg-url <PG_URL>`
 
 env var: `$PG_URL`
 
-default: `postgres://localhost:imud`
+default: `postgres://localhost/dozer`
 
 ## Data Model
 
-imud defines the records table as:
+Dozer defines the records table as:
 
 ```
 

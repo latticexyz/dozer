@@ -419,10 +419,10 @@ mod pl_pgsql_test {
         let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
         db.setup().await.expect("setting up pg");
         db.start().await.expect("starting pg");
-        db.create_database("imud-test")
+        db.create_database("dozer-test")
             .await
             .expect("creating test db");
-        let pg = test_pg(&db.settings().url("imud-test")).await;
+        let pg = test_pg(&db.settings().url("dozer-test")).await;
 
         let encoded_lengths =
             fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
@@ -440,10 +440,10 @@ mod pl_pgsql_test {
         let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
         db.setup().await.expect("setting up pg");
         db.start().await.expect("starting pg");
-        db.create_database("imud-test")
+        db.create_database("dozer-test")
             .await
             .expect("creating test db");
-        let pg = test_pg(&db.settings().url("imud-test")).await;
+        let pg = test_pg(&db.settings().url("dozer-test")).await;
 
         let encoded_lengths =
             fixed_bytes!("0000000000000000000000000000000000000020000000004000000000000060");
