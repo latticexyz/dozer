@@ -142,6 +142,7 @@ pub struct LogsResponse {
     logs: Vec<Log>,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn logs(
     State(state): State<Config>,
     Query(query): Query<LogsRequest>,
