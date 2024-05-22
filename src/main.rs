@@ -14,13 +14,17 @@ use axum::{
 use clap::Parser;
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::WrapErr;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
+use metrics_util::layers::Layer as MetricsUtilLayer;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use std::{cmp::max, str::FromStr, time::Duration};
+use std::{cmp::max, future::ready, str::FromStr, time::Duration};
 use tokio;
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
-use tracing;
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{
+    layer::SubscriberExt, Layer as TracingSubscriberLayer, Registry as TracingSubscriberRegistry,
+};
 
 static SCHEMA: &'static str = include_str!("./schema.sql");
 
@@ -104,12 +108,27 @@ fn api_ro_pg(cstr: &str, ro_password: &str) -> Pool {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    let subscriber = FmtSubscriber::builder()
-        .with_level(false)
-        .with_target(false)
-        .with_max_level(tracing::Level::INFO)
+    let no_uri = tracing_subscriber::fmt::format::debug_fn(|writer, field, value| {
+        if field.name() == "uri" {
+            write!(writer, "uri: [see-error-log]")
+        } else {
+            write!(writer, "{}: {:?}", field, value)
+        }
+    });
+    let file_appender = tracing_appender::rolling::hourly("/tmp", "dozer-error.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let error_data_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_filter(tracing::level_filters::LevelFilter::ERROR);
+    let info_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .fmt_fields(no_uri)
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .finish();
+        .with_filter(tracing::level_filters::LevelFilter::INFO);
+    let subscriber = TracingSubscriberRegistry::default()
+        .with(error_data_layer)
+        .with(info_layer)
+        .with(MetricsLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let args = Args::parse();
@@ -136,6 +155,13 @@ async fn main() -> eyre::Result<()> {
         pool: api_ro_pg(&args.pg_url(), &args.ro_password()),
     };
 
+    let prom_record = PrometheusBuilder::new()
+        .add_global_label("name", "dozer")
+        .build_recorder();
+    let prom_handler = prom_record.handle();
+    metrics::set_global_recorder(TracingContextLayer::all().layer(prom_record))
+        .expect("unable to set global metrics recorder");
+
     let tracing = TraceLayer::new_for_http()
         .make_span_with(|req: &axum::http::Request<Body>| {
             let path = req
@@ -145,10 +171,13 @@ async fn main() -> eyre::Result<()> {
             tracing::info_span!("http", path, status = tracing::field::Empty)
         })
         .on_response(
-            |resp: &axum::http::Response<_>, _: Duration, span: &tracing::Span| {
+            |resp: &axum::http::Response<_>, d: Duration, span: &tracing::Span| {
                 span.record("status", resp.status().as_str());
                 let _guard = span.enter();
+                metrics::counter!("api.requests").increment(1);
+                metrics::histogram!("api.latency").record(d.as_millis() as f64);
                 if !resp.status().is_success() {
+                    metrics::counter!("api.errors").increment(1);
                     tracing::error!("uri in error log")
                 }
             },
@@ -162,6 +191,7 @@ async fn main() -> eyre::Result<()> {
     let (app, listener) = (
         Router::new()
             .route("/", get(|| async { "hello\n" }))
+            .route("/metrics", get(move || ready(prom_handler.render())))
             .route("/q", post(api::query))
             .route("/api/logs", get(api::logs))
             .layer(service)
