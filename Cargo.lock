@@ -1733,6 +1733,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-stream",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",

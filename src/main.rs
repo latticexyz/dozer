@@ -136,34 +136,36 @@ async fn main() -> eyre::Result<()> {
         pool: api_ro_pg(&args.pg_url(), &args.ro_password()),
     };
 
+    let tracing = TraceLayer::new_for_http()
+        .make_span_with(|req: &axum::http::Request<Body>| {
+            let path = req
+                .extensions()
+                .get::<MatchedPath>()
+                .map(MatchedPath::as_str);
+            tracing::info_span!("http", path, status = tracing::field::Empty)
+        })
+        .on_response(
+            |resp: &axum::http::Response<_>, _: Duration, span: &tracing::Span| {
+                span.record("status", resp.status().as_str());
+                let _guard = span.enter();
+                if !resp.status().is_success() {
+                    tracing::error!("uri in error log")
+                }
+            },
+        );
+
+    let service = tower::ServiceBuilder::new()
+        .layer(tracing)
+        .layer(TimeoutLayer::new(Duration::from_secs(10)))
+        .layer(CompressionLayer::new());
+
     let (app, listener) = (
         Router::new()
             .route("/", get(|| async { "hello\n" }))
             .route("/q", post(api::query))
             .route("/api/logs", get(api::logs))
-            .with_state(config.clone())
-            .layer(CompressionLayer::new())
-            .layer(TimeoutLayer::new(Duration::from_secs(10)))
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(|request: &axum::http::Request<_>| {
-                        let matched_path = request
-                            .extensions()
-                            .get::<MatchedPath>()
-                            .map(MatchedPath::as_str);
-                        tracing::info_span!("http", matched_path)
-                    })
-                    .on_failure(
-                        |_error: tower_http::classify::ServerErrorsFailureClass,
-                         _latency: Duration,
-                         _span: &tracing::Span| {},
-                    )
-                    .on_response(
-                        |_: &axum::http::Response<Body>, latency: Duration, _: &tracing::Span| {
-                            tracing::info!(latency = latency.as_millis())
-                        },
-                    ),
-            ),
+            .layer(service)
+            .with_state(config.clone()),
         tokio::net::TcpListener::bind(args.listen)
             .await
             .expect("binding to tcp for http server"),
