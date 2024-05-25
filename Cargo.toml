@@ -5,13 +5,14 @@
 
 [dependencies]
 
-    alloy = { git = "https://github.com/alloy-rs/alloy", rev = "25916cd", features = [
+    alloy = { git = "https://github.com/alloy-rs/alloy", rev = "0f97116", features = [
         "contract",
         "network",
         "postgres",
         "provider-http",
         "providers",
         "rpc",
+        "rpc-client",
         "rpc-types-eth",
         "serde",
         "sol-types",
