@@ -143,9 +143,7 @@ async fn main() -> eyre::Result<()> {
         }
     });
 
-    let eth_client = ProviderBuilder::new()
-        .on_http(args.eth_url())
-        .expect("unable to build eth client");
+    let eth_client = ProviderBuilder::new().on_http(args.eth_url());
     {
         w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
         indexer::init_blocks(&mut w_pg, &eth_client).await?;

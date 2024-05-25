@@ -1,7 +1,10 @@
 use alloy::{
     primitives::{BlockHash, Bytes, FixedBytes},
     providers::{Provider, ReqwestProvider},
-    rpc::types::eth::{Block, BlockNumberOrTag, Filter, Log},
+    rpc::{
+        client::{BatchRequest, Waiter},
+        types::eth::{Block, BlockNumberOrTag, Filter, Log},
+    },
     sol,
     sol_types::SolEvent,
 };
@@ -128,16 +131,31 @@ impl EthApi for ReqwestProvider {
             .ok_or(IndexError::Retry(eyre!("no block found")))
     }
 
-    /// In addition to getting the logs from the RPC API
-    /// this function also does a basic validation step to ensure
-    /// that the logs returned from the API are within the requested
-    /// block range.
+    /// In addition to getting the logs from the RPC API this function also does
+    /// a basic validation step to ensure that the logs returned from the API
+    /// are within the requested block range.
+    ///
+    /// This function uses a batch request to get the logs. The batch request
+    /// contains a request for: block by height (using the log filter's "to"
+    /// field) and the logs request. We do this to ensure that the backend
+    /// serving the request has the latest block.
     #[tracing::instrument(skip_all fields(logs))]
     async fn logs(&self, f: Filter) -> eyre::Result<Vec<Log>, IndexError> {
-        let logs = self
-            .get_logs(&f)
-            .await
-            .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?;
+        let mut batch = BatchRequest::new(self.client());
+        let block: Waiter<Block> = batch
+            .add_call(
+                "eth_getBlockByNumber",
+                &(U64::from(f.get_to_block().unwrap()), false),
+            )
+            .wrap_err("building eth_getBlockByNumber")?;
+        let logs: Waiter<Vec<Log>> = batch
+            .add_call("eth_getLogs", &(&f,))
+            .wrap_err("building eth_getLogs")?;
+        batch.send().await.wrap_err("making batch call")?;
+        let (_block, logs) = (
+            block.await.wrap_err("getting logs")?,
+            logs.await.wrap_err("getting logs")?,
+        );
         // It's not uncommon for RPC API providers to respond to
         // log requests with data that is unrelated to the requested block range
         for log in &logs {
