@@ -153,8 +153,11 @@ impl EthApi for ReqwestProvider {
             .wrap_err("building eth_getLogs")?;
         batch.send().await.wrap_err("making batch call")?;
         let (_block, logs) = (
-            block.await.wrap_err("getting logs")?,
-            logs.await.wrap_err("getting logs")?,
+            block
+                .await
+                .map_err(|e| IndexError::Retry(eyre!("block {}", e)))?,
+            logs.await
+                .map_err(|e| IndexError::Retry(eyre!("logs {}", e)))?,
         );
         // It's not uncommon for RPC API providers to respond to
         // log requests with data that is unrelated to the requested block range
