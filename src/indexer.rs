@@ -521,7 +521,12 @@ impl Record {
         self.block_num = U64::from(u.block_num);
         self.log_idx = U64::from(u.log_idx);
         match u.kind {
-            UpdateKind::Del => self.deleted = true,
+            UpdateKind::Del => {
+                self.deleted = true;
+                self.static_data.clear();
+                self.encoded_lengths = FixedBytes::<32>::ZERO;
+                self.dynamic_data.clear();
+            }
             UpdateKind::Set {
                 static_data,
                 encoded_lengths,
