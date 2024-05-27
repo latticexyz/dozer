@@ -210,7 +210,7 @@ async fn main() -> eyre::Result<()> {
         }
         //TODO: this is a workaround for the redstone RPC API not having a reliable
         //block range limit for the eth_getLogs request.
-        const MAX_BATCH_SIZE: u64 = 1000;
+        const MAX_BATCH_SIZE: u64 = 100;
         let mut batch_size = MAX_BATCH_SIZE;
         loop {
             match indexer::index(&eth_client, &mut w_pg, batch_size).await {
