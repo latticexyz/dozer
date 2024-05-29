@@ -9,6 +9,7 @@ use alloy::{
 use axum::{extract::Query, extract::State, http::StatusCode, Json};
 use deadpool_postgres::Pool;
 use eyre::{Context, Result};
+use itertools::Itertools;
 use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -112,6 +113,11 @@ pub struct Log {
     #[serde(rename = "eventName")]
     event_name: String,
     args: LogArg,
+
+    #[serde(skip_serializing)]
+    block_num: U64,
+    #[serde(skip_serializing)]
+    log_idx: U64,
 }
 
 impl Log {
@@ -124,6 +130,8 @@ impl Log {
         Ok(Log {
             address: row.try_get("address")?,
             event_name: String::from("Store_SetRecord"),
+            block_num: row.try_get("block_num")?,
+            log_idx: row.try_get("log_idx")?,
             args: LogArg {
                 table_id: row.try_get("table_id")?,
                 key_tuple: key,
@@ -162,7 +170,11 @@ pub async fn logs(
         .await?
         .iter()
         .map(|r| Log::from_row(r))
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<Log>, _>>()?
+        .into_iter()
+        .sorted_by_key(|l| (l.block_num, l.log_idx))
+        .collect_vec();
+
     let bres = pg
         .query_one("select max(num)::text from blocks", &[])
         .await?;
@@ -254,6 +266,8 @@ impl LogsQuery {
         format!(
             "
             select
+                block_num,
+                log_idx,
                 address,
                 table_id,
                 key,
