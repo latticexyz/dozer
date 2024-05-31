@@ -354,6 +354,7 @@ pub async fn index<T: EthApi>(
 
 type RecordId = (FixedBytes<20>, FixedBytes<32>, Vec<u8>);
 
+#[derive(Debug)]
 struct Record {
     block_num: U64,
     log_idx: U64,
@@ -688,6 +689,7 @@ fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: &Bytes) {
 mod tests {
     static SCHEMA: &'static str = include_str!("./schema.sql");
 
+    use alloy::primitives::{Address, LogData, B256};
     use postgresql_embedded::{PostgreSQL, Settings};
     use tokio_postgres::NoTls;
     use tracing_subscriber::FmtSubscriber;
@@ -727,12 +729,88 @@ mod tests {
         block
     }
 
-    struct TestGetRemote(Block);
+    fn un_flatten_key(key: Vec<u8>) -> Vec<FixedBytes<32>> {
+        key.chunks_exact(32)
+            .map(|chunk| FixedBytes::<32>::from_slice(chunk))
+            .collect()
+    }
+
+    fn wrap_log(
+        b: Block,
+        log_index: u64,
+        l: alloy::primitives::Log<LogData>,
+    ) -> alloy::rpc::types::eth::Log {
+        Log {
+            inner: l,
+            block_hash: b.header.hash,
+            block_number: b.header.number,
+            block_timestamp: None,
+            transaction_hash: Some(B256::with_last_byte(0x01)),
+            transaction_index: Some(0x01),
+            log_index: Some(log_index),
+            removed: false,
+        }
+    }
+
+    fn dr(b: Block, log_index: u64, id: RecordId) -> Log {
+        wrap_log(
+            b,
+            log_index,
+            alloy::primitives::Log::new_from_event(
+                Address(id.0),
+                Store_DeleteRecord {
+                    table_id: id.1,
+                    key_tuple: un_flatten_key(id.2),
+                },
+            )
+            .unwrap()
+            .reserialize(),
+        )
+    }
+
+    fn sr(b: Block, log_index: u64, id: RecordId) -> Log {
+        wrap_log(
+            b,
+            log_index,
+            alloy::primitives::Log::new_from_event(
+                Address(id.0),
+                Store_SetRecord {
+                    table_id: id.1,
+                    key_tuple: un_flatten_key(id.2),
+                    static_data: Bytes::from_static(&[0x01]),
+                    encoded_lengths: B256::with_last_byte(0x00),
+                    dynamic_data: Bytes::from_static(&[0x01]),
+                },
+            )
+            .unwrap()
+            .reserialize(),
+        )
+    }
+
+    fn ss(b: Block, log_index: u64, id: RecordId, start: u64, data: Bytes) -> Log {
+        wrap_log(
+            b,
+            log_index,
+            alloy::primitives::Log::new_from_event(
+                Address(id.0),
+                Store_SpliceStaticData {
+                    table_id: id.1,
+                    key_tuple: un_flatten_key(id.2),
+                    start,
+                    data,
+                },
+            )
+            .unwrap()
+            .reserialize(),
+        )
+    }
+
+    struct TestGetRemote(Block, Vec<Log>);
 
     #[async_trait]
     impl EthApi for TestGetRemote {
         async fn logs(&self, _: Filter) -> eyre::Result<Vec<Log>, IndexError> {
-            todo!()
+            Ok(self.1.clone())
         }
         async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError> {
             match n {
@@ -740,6 +818,86 @@ mod tests {
                 BlockNumberOrTag::Latest => Ok(self.0.clone()),
                 _ => panic!("ah"),
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index() {
+        logging();
+        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("dozer-test")
+            .await
+            .expect("creating test db");
+
+        let mut pg = test_pg(&db.settings().url("dozer-test")).await;
+        pg.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(0), &FixedBytes::<32>::ZERO],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        let rid1 = (
+            FixedBytes::<20>::with_last_byte(0x01),
+            B256::with_last_byte(0x01),
+            B256::with_last_byte(0x01).to_vec(),
+        );
+        let mut ids = HashSet::new();
+        ids.insert(rid1.clone());
+
+        {
+            super::index(
+                &TestGetRemote {
+                    0: test_block(1, 1, 0),
+                    1: vec![
+                        sr(test_block(1, 1, 0), 1, rid1.clone()),
+                        ss(
+                            test_block(1, 1, 0),
+                            2,
+                            rid1.clone(),
+                            0,
+                            Bytes::copy_from_slice(&B256::repeat_byte(0x1)[..]),
+                        ),
+                        dr(test_block(1, 1, 0), 3, rid1.clone()),
+                    ],
+                },
+                &mut pg,
+                1,
+            )
+            .await
+            .expect("unable to index");
+            let pgtx = pg.transaction().await.expect("opening index tx");
+            let recs = Record::load(&pgtx, ids.clone())
+                .await
+                .expect("loading records");
+            let rec = recs.get(&rid1).expect("finding record");
+            assert_eq!(rec.static_data, &[0u8; 0]);
+        }
+        {
+            super::index(
+                &TestGetRemote {
+                    0: test_block(2, 2, 1),
+                    1: vec![ss(
+                        test_block(2, 2, 1),
+                        2,
+                        rid1.clone(),
+                        0,
+                        Bytes::copy_from_slice(&B256::repeat_byte(0x1)[..]),
+                    )],
+                },
+                &mut pg,
+                1,
+            )
+            .await
+            .expect("unable to index");
+            let pgtx = pg.transaction().await.expect("opening index tx");
+            let recs = Record::load(&pgtx, ids.clone())
+                .await
+                .expect("loading records");
+            let rec = recs.get(&rid1).expect("finding record");
+            assert_eq!(rec.static_data, &[1u8; 32]);
         }
     }
 
@@ -764,6 +922,7 @@ mod tests {
 
         let trg = TestGetRemote {
             0: test_block(10, 10, 9),
+            1: vec![],
         };
         let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
         assert_eq!(next_range.from.num, 1);
@@ -810,6 +969,7 @@ mod tests {
 
         let trg = TestGetRemote {
             0: test_block(2, 2, 1),
+            1: vec![],
         };
         next_to_index(&pgtx, &trg, 2, 2).await.unwrap();
 
