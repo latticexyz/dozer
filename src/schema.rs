@@ -1,5 +1,10 @@
 use crate::api_error::ApiError;
-use alloy::{primitives::FixedBytes, sol, sol_types::SolType};
+
+use alloy::{
+    primitives::{b256, FixedBytes, B256},
+    sol,
+    sol_types::SolType,
+};
 use axum::http::StatusCode;
 use eyre::{eyre, Result, WrapErr};
 use ruint::aliases::U64;
@@ -158,6 +163,9 @@ pub struct Schema {
 }
 
 impl Schema {
+    pub const TABLES_TABLE_ID: B256 =
+        b256!("746273746f72650000000000000000005461626c657300000000000000000000");
+
     pub fn from_data(
         address: FixedBytes<20>,
         table_id: FixedBytes<32>,
@@ -167,8 +175,8 @@ impl Schema {
         Ok(Schema {
             address: address,
             table_id: table_id,
-            key_schema: FixedBytes::<32>::from_slice(data.s.get(32..64).unwrap()),
-            val_schema: FixedBytes::<32>::from_slice(data.s.get(64..96).unwrap()),
+            key_schema: B256::from_slice(data.s.get(32..64).unwrap()),
+            val_schema: B256::from_slice(data.s.get(64..96).unwrap()),
             key_names: SolArrayOf::<sol!(string)>::abi_decode(
                 data.d.f0.expect("missing dynamic field for key names"),
                 false,
@@ -306,7 +314,7 @@ pub struct Data<'a> {
 
 impl<'a> Data<'a> {
     pub fn new(
-        encoded_lengths: FixedBytes<32>,
+        encoded_lengths: &'a FixedBytes<32>,
         dynamic_data: &'a [u8],
         static_data: &'a [u8],
     ) -> Result<Self> {
@@ -328,7 +336,7 @@ pub struct DynamicData<'a> {
 }
 
 impl<'a> DynamicData<'a> {
-    pub fn new(data: &'a [u8], el: FixedBytes<32>) -> Result<Self> {
+    pub fn new(data: &'a [u8], el: &'a FixedBytes<32>) -> Result<Self> {
         fn dec(s: &[u8]) -> usize {
             s.into_iter().fold(0, |n, b| n << 8 | *b as usize)
         }
@@ -357,14 +365,14 @@ mod dynamic_data_test {
     use alloy::primitives::fixed_bytes;
     #[test]
     fn test_new_error() {
-        let el = fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000020");
+        let el = &fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000020");
         let dd = &[1u8; 32];
         let dd = DynamicData::new(dd, el);
         assert!(dd.is_err());
     }
     #[test]
     fn test_new_empty() {
-        let el = fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
+        let el = &fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
         let dd = &[0u8];
         let dd = DynamicData::new(dd, el);
         assert!(dd.is_ok());
@@ -378,7 +386,7 @@ mod dynamic_data_test {
     }
     #[test]
     fn test_new_not_empty() {
-        let el = fixed_bytes!("0000000000000000000000000000000000000000000000002000000000000020");
+        let el = &fixed_bytes!("0000000000000000000000000000000000000000000000002000000000000020");
         let dd = &[1u8; 32];
         let dd = DynamicData::new(dd, el);
         assert!(dd.is_ok());

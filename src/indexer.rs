@@ -1,5 +1,7 @@
+use crate::schema::{Data, Schema};
+
 use alloy::{
-    primitives::{BlockHash, Bytes, FixedBytes},
+    primitives::{BlockHash, Bytes, FixedBytes, B256},
     providers::{Provider, ReqwestProvider},
     rpc::{
         client::{BatchRequest, Waiter},
@@ -318,6 +320,11 @@ pub async fn index<T: EthApi>(
     let (updates_count, records_count) = (updates.len(), record_ids.len());
 
     let tx = pg.transaction().await.wrap_err("opening index tx")?;
+    for u in &updates {
+        if u.table_id == Schema::TABLES_TABLE_ID {
+            save_table(&tx, &u).await?;
+        }
+    }
     let mut records = Record::load(&tx, record_ids).await?;
     let mut updated = HashSet::new();
     updates.into_iter().for_each(|u| {
@@ -349,6 +356,26 @@ pub async fn index<T: EthApi>(
         .record("to", next.to.num)
         .record("updates", updates_count)
         .record("records", records_count);
+    Ok(())
+}
+
+async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), IndexError> {
+    if let UpdateKind::Set {
+        static_data,
+        encoded_lengths,
+        dynamic_data,
+    } = &update.kind
+    {
+        let key: B256 = B256::from_slice(&update.key);
+        let schema = &Schema::from_data(
+            update.address,
+            key,
+            &Data::new(encoded_lengths, &dynamic_data, &static_data)?,
+        )?;
+        schema
+            .insert(pgtx, update.block_num, update.log_idx, update.address)
+            .await?
+    }
     Ok(())
 }
 
@@ -729,12 +756,6 @@ mod tests {
         block
     }
 
-    fn un_flatten_key(key: Vec<u8>) -> Vec<FixedBytes<32>> {
-        key.chunks_exact(32)
-            .map(|chunk| FixedBytes::<32>::from_slice(chunk))
-            .collect()
-    }
-
     fn wrap_log(
         b: Block,
         log_index: u64,
@@ -750,6 +771,12 @@ mod tests {
             log_index: Some(log_index),
             removed: false,
         }
+    }
+
+    fn un_flatten_key(key: Vec<u8>) -> Vec<FixedBytes<32>> {
+        key.chunks_exact(32)
+            .map(|chunk| FixedBytes::<32>::from_slice(chunk))
+            .collect()
     }
 
     fn dr(b: Block, log_index: u64, id: RecordId) -> Log {
