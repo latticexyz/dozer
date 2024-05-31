@@ -19,7 +19,7 @@ use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
 use metrics_util::layers::Layer as MetricsUtilLayer;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use std::{cmp::max, future::ready, str::FromStr, time::Duration};
+use std::{future::ready, str::FromStr, time::Duration};
 use tokio;
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{
@@ -210,7 +210,7 @@ async fn main() -> eyre::Result<()> {
         }
         //TODO: this is a workaround for the redstone RPC API not having a reliable
         //block range limit for the eth_getLogs request.
-        const MAX_BATCH_SIZE: u64 = 100;
+        const MAX_BATCH_SIZE: u64 = 1000;
         let mut batch_size = MAX_BATCH_SIZE;
         loop {
             match indexer::index(&eth_client, &mut w_pg, batch_size).await {
@@ -220,7 +220,7 @@ async fn main() -> eyre::Result<()> {
                     std::process::exit(1);
                 }
                 Err(indexer::IndexError::Retry(e)) => {
-                    batch_size = max(1, batch_size / 10);
+                    batch_size = 10;
                     tracing::error!("indexer retry: {:?}", e.to_string());
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
