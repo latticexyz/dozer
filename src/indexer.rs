@@ -359,6 +359,7 @@ pub async fn index<T: EthApi>(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), IndexError> {
     if let UpdateKind::Set {
         static_data,
