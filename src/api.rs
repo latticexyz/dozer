@@ -1,6 +1,4 @@
-use crate::api_error::ApiError;
-use crate::schema::Schema;
-use crate::sql::ParsedQuery;
+use crate::{api_error::ApiError, sql};
 
 use alloy::{
     hex,
@@ -36,9 +34,8 @@ pub async fn query(
     Json(req): Json<GetRecsReq>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
-    let parsed_query = ParsedQuery::new(&req.query)?;
-    let schema = Schema::from_pg(&pg, req.address, parsed_query.tables()?).await?;
-    let query = parsed_query.enhance(&schema)?;
+    let mut schemas = sql::schemas(req.address, req.query.clone(), &pg).await?;
+    let query = sql::enhance(&mut schemas, req.query)?;
 
     let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
     for val in req.values {

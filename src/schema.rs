@@ -1,11 +1,8 @@
-use crate::api_error::ApiError;
-
 use alloy::{
     primitives::{b256, FixedBytes, B256},
     sol,
     sol_types::SolType,
 };
-use axum::http::StatusCode;
 use eyre::{eyre, Result, WrapErr};
 use ruint::aliases::U64;
 use tokio_postgres::{Client, Row, Transaction};
@@ -28,8 +25,8 @@ pub mod field {
         Array(Static),
     }
     impl Kind {
-        pub fn from_schema_type(t: u8) -> eyre::Result<Self> {
-            Ok(match t {
+        pub fn from_schema_type(t: u8) -> Option<Self> {
+            Some(match t {
                 n if t < 32 => Kind::Static(Static::Numeric(n as usize + 1)),
                 n if t < 64 => Kind::Static(Static::Numeric(n as usize - 31)),
                 n if t < 96 => Kind::Static(Static::Bytea(n as usize - 63)),
@@ -42,7 +39,7 @@ pub mod field {
                 _ if t == 195 => Kind::Dynamic(Dynamic::Array(Static::Bytea(20))),
                 _ if t == 196 => Kind::Dynamic(Dynamic::Bytea),
                 _ if t == 197 => Kind::Dynamic(Dynamic::Text),
-                _ => return Err(eyre::eyre!("unknown type: {:x}", t)),
+                _ => return None,
             })
         }
         pub fn size(&self) -> Option<usize> {
@@ -190,31 +187,36 @@ impl Schema {
         })
     }
 
+    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
+        Ok(Schema {
+            address: row.try_get("address")?,
+            table_id: row.try_get("id")?,
+            key_names: row.try_get("key_names")?,
+            key_schema: row.try_get("key_schema")?,
+            val_names: row.try_get("val_names")?,
+            val_schema: row.try_get("val_schema")?,
+        })
+    }
+
     #[tracing::instrument]
     pub async fn from_pg(
         pg: &Client,
         address: FixedBytes<20>,
-        table_names: Vec<String>,
-    ) -> Result<Self, ApiError> {
-        if table_names.len() != 1 {
-            return Err(ApiError::User(
-                StatusCode::BAD_REQUEST,
-                String::from("must be 1 table for now"),
-            ));
-        }
-        let schema = Self::from_row(
-            &pg.query_one(
-                r#"
+        tables: Vec<String>,
+    ) -> Result<Vec<Self>, tokio_postgres::Error> {
+        pg.query(
+            r#"
                 select address, id, key_names, key_schema, val_names, val_schema
                 from tables
                 where address = $1
-                and name = $2
+                and name = ANY($2)
                 "#,
-                &[&address, &table_names.first().unwrap()],
-            )
-            .await?,
-        )?;
-        Ok(schema)
+            &[&address, &tables],
+        )
+        .await?
+        .iter()
+        .map(Schema::from_row)
+        .collect::<Result<Vec<Schema>, _>>()
     }
 
     #[tracing::instrument(level="debug" skip_all)]
@@ -248,17 +250,6 @@ impl Schema {
         .wrap_err("inserting new table")
     }
 
-    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
-        Ok(Schema {
-            address: row.try_get("address")?,
-            table_id: row.try_get("id")?,
-            key_names: row.try_get("key_names")?,
-            key_schema: row.try_get("key_schema")?,
-            val_names: row.try_get("val_names")?,
-            val_schema: row.try_get("val_schema")?,
-        })
-    }
-
     pub fn table_name(&self) -> String {
         let b: Vec<u8> = self.table_id[15..32]
             .iter()
@@ -268,16 +259,12 @@ impl Schema {
         String::from_utf8(b).unwrap()
     }
 
-    pub fn get_col_sql(&self, name: &str) -> Result<String> {
-        let mut pos = self
-            .val_names
-            .iter()
-            .position(|n| n == name)
-            .ok_or(eyre!(format!(
-                "table: {} has no column named: {}",
-                self.table_name(),
-                name
-            )))?;
+    pub fn get_col_sql(&self, name: &str) -> Option<String> {
+        if let Some(pos) = self.key_names.iter().position(|n| n == name) {
+            return Some(format!("sdec(key, {}, 32) as {}", pos, name));
+        }
+
+        let mut pos = self.val_names.iter().position(|n| n == name)?;
         let schema_type = field::Kind::from_schema_type(self.val_schema[4 + pos])?;
         if matches!(schema_type, field::Kind::Static(_)) {
             pos = self
@@ -288,7 +275,7 @@ impl Schema {
                 .map(|b| field::Kind::from_schema_type(*b).unwrap().size().unwrap())
                 .sum()
         }
-        Ok(schema_type.to_sql(pos, name))
+        Some(schema_type.to_sql(pos, name))
     }
 }
 
