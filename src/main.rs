@@ -220,7 +220,7 @@ async fn main() -> eyre::Result<()> {
                     std::process::exit(1);
                 }
                 Err(indexer::IndexError::Retry(e)) => {
-                    batch_size = std::cmp::max(1, batch_size / 100);
+                    batch_size = std::cmp::max(1, batch_size / 10);
                     tracing::error!("indexer retry: {:?}", e.to_string());
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
