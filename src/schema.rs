@@ -58,30 +58,31 @@ pub mod field {
                         format!("sdec(static_data, {}, {}) as {}", pos, size, name)
                     }
                 },
-                Kind::Dynamic(t) => {
-                    match t {
-                        Dynamic::Bytea => {
-                            format!("ddec(encoded_lengths, dynamic_data, {}) as {}", pos, name)
-                        }
-                        Dynamic::Text => {
-                            format!("convert_from(ddec(encoded_lengths, dynamic_data, {}), 'UTF8') as {}", pos, name)
-                        }
-                        Dynamic::Array(it) => match it {
-                            Static::Bytea(size) => {
-                                format!(
-                                    "b2ab(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
-                                    pos, size, name
-                                )
-                            }
-                            Static::Numeric(size) => {
-                                format!(
-                                    "b2an(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
-                                    pos, size, name
-                                )
-                            }
-                        },
+                Kind::Dynamic(t) => match t {
+                    Dynamic::Bytea => {
+                        format!("ddec(encoded_lengths, dynamic_data, {}) as {}", pos, name)
                     }
-                }
+                    Dynamic::Text => {
+                        format!(
+                            r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, {}), '\x00'), 'UTF8') as {}"#,
+                            pos, name
+                        )
+                    }
+                    Dynamic::Array(it) => match it {
+                        Static::Bytea(size) => {
+                            format!(
+                                "b2ab(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
+                                pos, size, name
+                            )
+                        }
+                        Static::Numeric(size) => {
+                            format!(
+                                "b2an(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
+                                pos, size, name
+                            )
+                        }
+                    },
+                },
             }
         }
     }
@@ -147,12 +148,13 @@ pub mod field {
             );
             assert_eq!(
                 Kind::Dynamic(Dynamic::Text).to_sql(0, "foo"),
-                "convert_from(ddec(encoded_lengths, dynamic_data, 0), 'UTF8') as foo"
+                r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, 0), '\x00'), 'UTF8') as foo"#
             );
         }
     }
 }
 
+#[derive(Debug)]
 pub struct Schema {
     pub address: FixedBytes<20>,
     pub table_id: FixedBytes<32>,
@@ -188,7 +190,12 @@ impl Schema {
         })
     }
 
-    pub async fn from_pg(pg: &Client, table_names: Vec<String>) -> Result<Self, ApiError> {
+    #[tracing::instrument]
+    pub async fn from_pg(
+        pg: &Client,
+        address: FixedBytes<20>,
+        table_names: Vec<String>,
+    ) -> Result<Self, ApiError> {
         if table_names.len() != 1 {
             return Err(ApiError::User(
                 StatusCode::BAD_REQUEST,
@@ -197,12 +204,13 @@ impl Schema {
         }
         let schema = Self::from_row(
             &pg.query_one(
-                "
-                select id, key_names, key_schema, val_names, val_schema
+                r#"
+                select address, id, key_names, key_schema, val_names, val_schema
                 from tables
-                where name = $1
-                ",
-                &[&table_names.first().unwrap()],
+                where address = $1
+                and name = $2
+                "#,
+                &[&address, &table_names.first().unwrap()],
             )
             .await?,
         )?;

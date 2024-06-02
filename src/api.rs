@@ -25,17 +25,19 @@ pub struct Config {
 
 #[derive(Deserialize)]
 pub struct GetRecsReq {
+    pub address: FixedBytes<20>,
     pub query: String,
     pub values: Vec<Value>,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn query(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
     let parsed_query = ParsedQuery::new(&req.query)?;
-    let schema = Schema::from_pg(&pg, parsed_query.tables()?).await?;
+    let schema = Schema::from_pg(&pg, req.address, parsed_query.tables()?).await?;
     let query = parsed_query.enhance(&schema)?;
 
     let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
@@ -78,6 +80,10 @@ pub async fn query(
                 Type::BYTEA => {
                     let b: &[u8] = row.get(idx);
                     Value::String(hex::encode(b))
+                }
+                Type::TEXT => {
+                    let s: String = row.get(idx);
+                    Value::String(s)
                 }
                 _ => Value::Null,
             };
