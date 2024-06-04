@@ -261,7 +261,7 @@ impl Schema {
 
     pub fn get_col_sql(&self, name: &str) -> Option<String> {
         if let Some(pos) = self.key_names.iter().position(|n| n == name) {
-            return Some(format!("sdec(key, {}, 32) as {}", pos, name));
+            return Some(format!("sdec(key, {}, 32) as {}", pos * 32, name));
         }
 
         let mut pos = self.val_names.iter().position(|n| n == name)?;
