@@ -35,7 +35,7 @@ pub async fn query(
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
     let mut schemas = sql::schemas(req.address, req.query.clone(), &pg).await?;
-    let query = sql::enhance(&mut schemas, req.query)?;
+    let query = sql::enhance(req.address, &mut schemas, req.query)?;
 
     let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
     for val in req.values {

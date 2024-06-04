@@ -121,4 +121,4 @@ begin
     END LOOP;
     RETURN substring(dynamic_data FROM field_start FOR field_length);
 end;
-$$ language plpgsql;
+$$ language plpgsql strict immutable;
