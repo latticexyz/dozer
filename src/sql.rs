@@ -45,6 +45,7 @@ pub async fn schemas(
 }
 
 pub fn enhance(
+    address: FixedBytes<20>,
     schemas: &mut HashMap<String, QueryItem>,
     query: String,
 ) -> Result<String, ApiError> {
@@ -67,7 +68,7 @@ pub fn enhance(
             Expr::CompoundIdentifier(id) => {
                 schemas
                     .get_mut(&id[0].to_string())
-                    .unwrap()
+                    .expect(&format!("missing schema for {:?}", id))
                     .selected
                     .insert(id[1].to_string());
             }
@@ -79,6 +80,7 @@ pub fn enhance(
     res += &schemas
         .values()
         .into_iter()
+        .sorted_by_key(|s| s.schema.table_name())
         .map(|s| {
             let mut inner = String::new();
             inner += &format!("{} as (", s.schema.table_name());
@@ -91,8 +93,9 @@ pub fn enhance(
                 .collect::<Vec<String>>()
                 .join(",");
             inner += &format!(
-                r#" from records where not expired and not deleted and table_id = '\x{}') "#,
-                hex::encode(s.schema.table_id)
+                r#" from records where address = '\x{}' and table_id = '\x{}' and not expired and not deleted) "#,
+                hex::encode(address),
+                hex::encode(s.schema.table_id),
             );
             Ok(inner)
         })
@@ -103,13 +106,13 @@ pub fn enhance(
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use alloy::primitives::fixed_bytes;
 
     #[test]
     fn test_enhance() {
         let pq = enhance(
+            FixedBytes::<20>::ZERO,
             &mut HashMap::from([
                 (
                     String::from("foo"),
@@ -152,7 +155,7 @@ mod tests {
         );
         assert_eq!(
             pq.unwrap(),
-            "with foo as (select b2n(sdec(static_data, 0, 4)) as value from records where not expired and not deleted and table_id = '\\x74620000000000000000000000000000666f6f00000000000000000000000000') ,bar as (select b2n(sdec(static_data, 0, 4)) as value from records where not expired and not deleted and table_id = '\\x7462000000000000000000000000000062617200000000000000000000000000') select foo.value, bar.value from foo, bar where foo.value = bar.value"
+            "with bar as (select b2n(sdec(static_data, 0, 4)) as value from records where address = '\\x0000000000000000000000000000000000000000' and table_id = '\\x7462000000000000000000000000000062617200000000000000000000000000' and not expired and not deleted) ,foo as (select b2n(sdec(static_data, 0, 4)) as value from records where address = '\\x0000000000000000000000000000000000000000' and table_id = '\\x74620000000000000000000000000000666f6f00000000000000000000000000' and not expired and not deleted) select foo.value, bar.value from foo, bar where foo.value = bar.value"
         )
     }
 }
