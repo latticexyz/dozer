@@ -42,9 +42,14 @@ pub mod field {
                 _ => return None,
             })
         }
+
         pub fn size(&self) -> Option<usize> {
-            todo!()
+            match self {
+                Kind::Static(Static::Bytea(s)) | Kind::Static(Static::Numeric(s)) => Some(*s),
+                Kind::Dynamic(_) => None,
+            }
         }
+
         pub fn to_sql(&self, pos: usize, name: &str) -> String {
             match self {
                 Kind::Static(t) => match t {
@@ -146,6 +151,15 @@ pub mod field {
             assert_eq!(
                 Kind::Dynamic(Dynamic::Text).to_sql(0, "foo"),
                 r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, 0), '\x00'), 'UTF8') as foo"#
+            );
+        }
+        #[test]
+        fn test_size() {
+            assert_eq!(Kind::Static(Static::Bytea(1)).size(), Some(1));
+            assert_eq!(Kind::Static(Static::Numeric(32)).size(), Some(32));
+            assert_eq!(
+                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))).size(),
+                None
             );
         }
     }
