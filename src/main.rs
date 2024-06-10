@@ -43,6 +43,9 @@ struct Args {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_index: bool,
 
+    #[clap(short, long)]
+    index_start: Option<u64>,
+
     #[clap(short, long, default_value = "0.0.0.0:8000")]
     listen: String,
 }
@@ -146,7 +149,7 @@ async fn main() -> eyre::Result<()> {
     let eth_client = ProviderBuilder::new().on_http(args.eth_url());
     {
         w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
-        indexer::init_blocks(&mut w_pg, &eth_client).await?;
+        indexer::init_blocks(&mut w_pg, &eth_client, args.index_start.unwrap_or(0)).await?;
     }
 
     let config = api::Config {
