@@ -18,7 +18,7 @@
     ] }
     async-trait = "0.1"
     axum = "0.7.5"
-    clap = { version = "4.5.4", features = ["derive"] }
+    clap = { version = "4.5.4", features = ["derive", "env"] }
     deadpool-postgres = "0.13.2"
     eyre = "0.6.12"
     futures = "0.3"
