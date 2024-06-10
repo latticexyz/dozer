@@ -46,6 +46,9 @@ struct Args {
     #[clap(short, long)]
     index_start: Option<u64>,
 
+    #[clap(short, long, default_value = "1000")]
+    batch_size: u64,
+
     #[clap(short, long, default_value = "0.0.0.0:8000")]
     listen: String,
 }
@@ -213,11 +216,10 @@ async fn main() -> eyre::Result<()> {
         }
         //TODO: this is a workaround for the redstone RPC API not having a reliable
         //block range limit for the eth_getLogs request.
-        const MAX_BATCH_SIZE: u64 = 1000;
-        let mut batch_size = MAX_BATCH_SIZE;
+        let mut batch_size = args.batch_size;
         loop {
             match indexer::index(&eth_client, &mut w_pg, batch_size).await {
-                Ok(_) => batch_size = MAX_BATCH_SIZE,
+                Ok(_) => batch_size = args.batch_size,
                 Err(indexer::IndexError::Fatal(e)) => {
                     tracing::error!(%e, "An error occurred: {:?}", e);
                     std::process::exit(1);
