@@ -86,9 +86,9 @@ struct NextRange {
     to: NumHash,
 }
 
-pub async fn init_blocks<F: EthApi>(pg: &mut Client, remote: &F) -> eyre::Result<()> {
+pub async fn init_blocks<F: EthApi>(pg: &mut Client, remote: &F, start: u64) -> eyre::Result<()> {
     let block = remote
-        .block(BlockNumberOrTag::Number(0))
+        .block(BlockNumberOrTag::Number(start))
         .await
         .map_err(|e| eyre!("getting block: {:?}", e))?;
     pg.execute(
