@@ -25,19 +25,20 @@ use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::Tr
 use tracing_subscriber::{
     layer::SubscriberExt, Layer as TracingSubscriberLayer, Registry as TracingSubscriberRegistry,
 };
+use url::Url;
 
 static SCHEMA: &'static str = include_str!("./schema.sql");
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    #[arg(short, long)]
-    pg_url: Option<String>,
+    #[arg(long, env = "PG_URL", default_value = "postgres://localhost/dozer")]
+    pg_url: String,
 
-    #[arg(short, long)]
-    eth_url: Option<String>,
+    #[arg(long, env = "ETH_URL", default_value = "https://rpc.redstonechain.com")]
+    eth_url: Url,
 
-    #[arg(short, long)]
+    #[arg(long, env = "RO_PASSWORD")]
     ro_password: Option<String>,
 
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -51,45 +52,6 @@ struct Args {
 
     #[clap(short, long, default_value = "0.0.0.0:8000")]
     listen: String,
-}
-
-impl Args {
-    fn ro_password(&self) -> String {
-        match &self.ro_password {
-            Some(s) => s.clone(),
-            None => {
-                if let Ok(s) = std::env::var("RO_PASSWORD") {
-                    s
-                } else {
-                    String::new()
-                }
-            }
-        }
-    }
-    fn pg_url(&self) -> String {
-        match &self.pg_url {
-            Some(u) => u.clone(),
-            None => {
-                if let Ok(u) = std::env::var("PG_URL") {
-                    u
-                } else {
-                    String::from("postgres://localhost/dozer")
-                }
-            }
-        }
-    }
-    fn eth_url(&self) -> url::Url {
-        match &self.eth_url {
-            Some(u) => u.parse().expect("unable to parse eth url"),
-            None => {
-                if let Ok(u) = std::env::var("ETH_URL") {
-                    u.parse().expect("unable to parse eth url")
-                } else {
-                    "http://localhost:8545".parse().unwrap()
-                }
-            }
-        }
-    }
 }
 
 fn api_ro_pg(cstr: &str, ro_password: &str) -> Pool {
@@ -142,21 +104,24 @@ async fn main() -> eyre::Result<()> {
     let mut builder = SslConnector::builder(SslMethod::tls()).expect("tls builder");
     builder.set_verify(SslVerifyMode::NONE);
     let connector = MakeTlsConnector::new(builder.build());
-    let (mut w_pg, w_pg_conn) = tokio_postgres::connect(&args.pg_url(), connector).await?;
+    let (mut w_pg, w_pg_conn) = tokio_postgres::connect(&args.pg_url, connector).await?;
     tokio::spawn(async move {
         if let Err(e) = w_pg_conn.await {
             panic!("database writer error: {}", e)
         }
     });
 
-    let eth_client = ProviderBuilder::new().on_http(args.eth_url());
+    let eth_client = ProviderBuilder::new().on_http(args.eth_url);
     {
         w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
         indexer::init_blocks(&mut w_pg, &eth_client, args.index_start.unwrap_or(0)).await?;
     }
 
     let config = api::Config {
-        pool: api_ro_pg(&args.pg_url(), &args.ro_password()),
+        pool: api_ro_pg(
+            &args.pg_url,
+            &args.ro_password.expect("missing read only pg password"),
+        ),
     };
 
     let prom_record = PrometheusBuilder::new()
