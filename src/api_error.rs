@@ -1,15 +1,15 @@
-use axum::{http::StatusCode, Json};
-use serde::Serialize;
+use axum::http::StatusCode;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub enum ApiError {
-    User(axum::http::StatusCode, String),
+    User(String),
     Server(Box<dyn std::error::Error + Send + Sync>),
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ApiErrorMessage {
-    msg: String,
+    pub msg: String,
 }
 
 impl From<serde_json::Error> for ApiError {
@@ -27,10 +27,7 @@ impl From<tokio_postgres::Error> for ApiError {
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
-            Self::User(status, msg) => {
-                tracing::error!("user-error={}", msg);
-                (status, msg)
-            }
+            Self::User(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::Server(e) => {
                 tracing::error!(%e, "server-error={:?}", e);
                 (
@@ -42,7 +39,7 @@ impl axum::response::IntoResponse for ApiError {
         let m = ApiErrorMessage {
             msg: String::from(message),
         };
-        (status, Json(m)).into_response()
+        (status, axum::Json(m)).into_response()
     }
 }
 

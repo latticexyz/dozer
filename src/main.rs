@@ -1,8 +1,8 @@
 mod api;
 mod api_error;
 mod indexer;
-mod schema;
-mod sql;
+mod mud_encoding;
+mod mud_schema;
 
 use alloy::providers::ProviderBuilder;
 use axum::{

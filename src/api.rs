@@ -1,10 +1,10 @@
-use crate::{api_error::ApiError, sql};
+use crate::{api_error::ApiError, mud_schema};
 
 use alloy::{
     hex,
     primitives::{fixed_bytes, Bytes, FixedBytes},
 };
-use axum::{extract::Query, extract::State, http::StatusCode, Json};
+use axum::{extract::Query, extract::State, Json};
 use deadpool_postgres::Pool;
 use eyre::{Context, Result};
 use itertools::Itertools;
@@ -21,7 +21,7 @@ pub struct Config {
     pub pool: Pool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct GetRecsReq {
     pub address: FixedBytes<20>,
     pub query: String,
@@ -33,10 +33,6 @@ pub async fn query(
     State(state): State<Config>,
     Json(req): Json<GetRecsReq>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
-    let mut schemas = sql::schemas(req.address, req.query.clone(), &pg).await?;
-    let query = sql::enhance(req.address, &mut schemas, req.query)?;
-
     let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
     for val in req.values {
         match val {
@@ -44,19 +40,20 @@ pub async fn query(
             Value::String(s) => vals.push(Box::new(hex::decode(s).unwrap())),
             _ => {
                 return Err(ApiError::User(
-                    StatusCode::BAD_REQUEST,
-                    String::from("values must be string or number"),
+                    "values must be string or number".to_string(),
                 ))
             }
         }
     }
-    let conn = state.pool.get().await.wrap_err("getting conn from pool")?;
-    let vals = vals
-        .iter()
-        .map(|x| x.as_ref() as &(dyn ToSql + Sync))
-        .collect::<Vec<_>>();
-    let rows = conn
-        .query(dbg!(&query), &vals[..])
+    let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
+    let rows = pg
+        .query(
+            &mud_schema::query::enhance(&pg, req.address, &req.query).await?,
+            &vals
+                .iter()
+                .map(|x| x.as_ref() as &(dyn ToSql + Sync))
+                .collect_vec(),
+        )
         .await
         .wrap_err("querying records table")?;
 
