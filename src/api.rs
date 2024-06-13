@@ -31,7 +31,7 @@ pub struct GetRecsReq {
 #[tracing::instrument(skip_all)]
 pub async fn query(
     State(state): State<Config>,
-    Json(req): Json<GetRecsReq>,
+    crate::api_error::Json(req): crate::api_error::Json<GetRecsReq>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
     for val in req.values {
