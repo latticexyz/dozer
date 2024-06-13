@@ -1,5 +1,6 @@
 mod api;
-mod api_error;
+mod api_logs;
+mod api_sql;
 mod indexer;
 mod mud_encoding;
 mod mud_schema;
@@ -174,8 +175,8 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
         Router::new()
             .route("/", get(|| async { "hello\n" }))
             .route("/metrics", get(move || ready(prom_handler.render())))
-            .route("/q", post(api::query))
-            .route("/api/logs", get(api::logs))
+            .route("/q", post(api_sql::handle))
+            .route("/api/logs", get(api_logs::handle))
             .layer(service)
             .with_state(config.clone()),
         tokio::net::TcpListener::bind(args.listen)
