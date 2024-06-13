@@ -1,13 +1,215 @@
 use alloy::{
+    hex,
     primitives::{b256, FixedBytes, B256},
     sol,
     sol_types::SolType,
 };
-use eyre::{eyre, Result, WrapErr};
+use eyre::{Result, WrapErr};
+use itertools::Itertools;
 use ruint::aliases::U64;
 use tokio_postgres::{Client, Row, Transaction};
 
-pub mod field {
+use crate::api_error::ApiError;
+use crate::mud_encoding;
+
+pub mod query {
+    use alloy::primitives::FixedBytes;
+    use eyre::Result;
+    use itertools::Itertools;
+    use sqlparser::{
+        ast::{visit_expressions, visit_relations, Expr},
+        dialect::PostgreSqlDialect,
+        parser::Parser,
+    };
+    use std::{
+        collections::{HashMap, HashSet},
+        ops::ControlFlow,
+    };
+
+    use crate::api_error::ApiError;
+
+    use super::Schema;
+
+    const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
+
+    pub async fn enhance(
+        pg: &tokio_postgres::Client,
+        address: FixedBytes<20>,
+        user_query: &str,
+    ) -> Result<String, ApiError> {
+        let parsed_query =
+            Parser::parse_sql(PG, user_query).map_err(|e| ApiError::User(e.to_string()))?;
+        let mut schemas = load_schemas(pg, address, &parsed_query).await?;
+        if schemas.len() == 0 {
+            return Err(ApiError::User("no tables found in query".to_string()));
+        }
+        build_sql(user_query, &parsed_query, &mut schemas)
+    }
+
+    struct SelectItem {
+        schema: Schema,
+        columns: HashSet<String>,
+    }
+
+    type Schemas = HashMap<String, SelectItem>;
+
+    async fn load_schemas(
+        pg: &tokio_postgres::Client,
+        address: FixedBytes<20>,
+        query: &Vec<sqlparser::ast::Statement>,
+    ) -> Result<Schemas> {
+        let mut table_names = HashSet::new();
+        visit_relations(query, |relation| {
+            table_names.insert(relation.to_string());
+            ControlFlow::<()>::Continue(())
+        });
+        Ok(
+            Schema::from_pg(pg, address, table_names.into_iter().collect())
+                .await?
+                .into_iter()
+                .map(|s| {
+                    (
+                        s.table_name(),
+                        SelectItem {
+                            schema: s,
+                            columns: HashSet::new(),
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn build_sql(
+        user_query: &str,
+        parsed_query: &Vec<sqlparser::ast::Statement>,
+        schemas: &mut Schemas,
+    ) -> Result<String, ApiError> {
+        let col_search = visit_expressions(parsed_query, |expr| match expr {
+            Expr::Identifier(id) => match schemas.values_mut().next() {
+                Some(s) => {
+                    s.columns.insert(id.to_string());
+                    ControlFlow::Continue(())
+                }
+                None => ControlFlow::Break(ApiError::User(format!(
+                    "no schemas found for {}",
+                    id.to_string()
+                ))),
+            },
+            Expr::CompoundIdentifier(id) => match schemas.get_mut(&id[0].to_string()) {
+                Some(s) => {
+                    s.columns.insert(id[1].to_string());
+                    ControlFlow::Continue(())
+                }
+                None => ControlFlow::Break(ApiError::User(format!(
+                    "no schemas found for {}",
+                    id[0].to_string()
+                ))),
+            },
+            _ => ControlFlow::Continue(()),
+        });
+        if let ControlFlow::Break(err) = col_search {
+            return Err(err);
+        }
+        let mut query = Vec::new();
+        query.push("with".to_string());
+        query.push(
+            schemas
+                .values()
+                .sorted_by_key(|s| s.schema.table_name())
+                .map(|s| {
+                    s.schema
+                        .cte_sql(s.columns.clone().into_iter().collect_vec())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(","),
+        );
+        query.push(user_query.to_string());
+        Ok(query.join(" "))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use alloy::primitives::fixed_bytes;
+
+        fn fmt_sql(sql: &str) -> Result<String> {
+            let ast = Parser::parse_sql(PG, sql)?;
+            Ok(ast[0].to_string())
+        }
+
+        #[test]
+        fn test_enhance() {
+            let user_query = String::from(
+                "select foo.value, bar.value from foo, bar where foo.value = bar.value",
+            );
+            let pq = build_sql(
+                &user_query,
+                &Parser::parse_sql(PG, &user_query).unwrap(),
+                &mut HashMap::from([
+                    (
+                        String::from("foo"),
+                        SelectItem {
+                            columns: HashSet::new(),
+                            schema: Schema {
+                                address: fixed_bytes!(),
+                                table_id: fixed_bytes!(
+                                "74620000000000000000000000000000666f6f00000000000000000000000000"
+                            ),
+                                key_names: vec![],
+                                val_names: vec![String::from("value")],
+                                key_schema: fixed_bytes!(),
+                                val_schema: fixed_bytes!(
+                                "0004010003000000000000000000000000000000000000000000000000000000"
+                            ),
+                            },
+                        },
+                    ),
+                    (
+                        String::from("bar"),
+                        SelectItem {
+                            columns: HashSet::new(),
+                            schema: Schema {
+                                address: fixed_bytes!(),
+                                table_id: fixed_bytes!(
+                                "7462000000000000000000000000000062617200000000000000000000000000"
+                            ),
+                                key_names: vec![],
+                                val_names: vec![String::from("value")],
+                                key_schema: fixed_bytes!(),
+                                val_schema: fixed_bytes!(
+                                "0004010003000000000000000000000000000000000000000000000000000000"
+                            ),
+                            },
+                        },
+                    ),
+                ]),
+            );
+            assert_eq!(
+                fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
+                fmt_sql(r#"
+                    with bar as (
+                        select b2n(sdec(static_data, 0, 4)) as value
+                        from records
+                        where address = '\x0000000000000000000000000000000000000000'
+                        and table_id = '\x7462000000000000000000000000000062617200000000000000000000000000'
+                        and not expired
+                        and not deleted
+                    ) ,foo as (
+                        select b2n(sdec(static_data, 0, 4)) as value
+                        from records
+                        where address = '\x0000000000000000000000000000000000000000'
+                        and table_id = '\x74620000000000000000000000000000666f6f00000000000000000000000000'
+                        and not expired
+                        and not deleted
+                    ) select foo.value, bar.value from foo, bar where foo.value = bar.value
+                "#).unwrap()
+        )
+        }
+    }
+}
+
+mod field {
     #[derive(Debug, PartialEq)]
     pub enum Kind {
         Static(Static),
@@ -182,22 +384,22 @@ impl Schema {
     pub fn from_data(
         address: FixedBytes<20>,
         table_id: FixedBytes<32>,
-        data: &Data,
+        data: &mud_encoding::Data,
     ) -> Result<Self> {
         type SolArrayOf<T> = sol! { T[] };
+        let (key_names, val_names) = (
+            data.get_dynamic(0)
+                .expect("missing dynamic data for key_names"),
+            data.get_dynamic(1)
+                .expect("missing dynamic data for val_names"),
+        );
         Ok(Schema {
             address: address,
             table_id: table_id,
-            key_schema: B256::from_slice(data.s.get(32..64).unwrap()),
-            val_schema: B256::from_slice(data.s.get(64..96).unwrap()),
-            key_names: SolArrayOf::<sol!(string)>::abi_decode(
-                data.d.f0.expect("missing dynamic field for key names"),
-                false,
-            )?,
-            val_names: SolArrayOf::<sol!(string)>::abi_decode(
-                data.d.f1.expect("missing dynamic field for val names"),
-                false,
-            )?,
+            key_schema: data.get_static32(1),
+            val_schema: data.get_static32(2),
+            key_names: SolArrayOf::<sol!(string)>::abi_decode(key_names, false)?,
+            val_names: SolArrayOf::<sol!(string)>::abi_decode(val_names, false)?,
         })
     }
 
@@ -273,13 +475,38 @@ impl Schema {
         String::from_utf8(b).unwrap()
     }
 
-    pub fn get_col_sql(&self, name: &str) -> Option<String> {
-        if let Some(pos) = self.key_names.iter().position(|n| n == name) {
-            return Some(format!("sdec(key, {}, 32) as {}", pos * 32, name));
-        }
+    pub fn cte_sql(&self, columns: Vec<String>) -> Result<String, ApiError> {
+        let mut res: Vec<String> = Vec::new();
+        res.push(format!("{} as (", self.table_name()));
+        res.push("select".to_string());
+        res.push(
+            columns
+                .iter()
+                .map(|c| self.col_sql(c))
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .join(","),
+        );
+        res.push(format!(
+            r#"from records where address = '\x{}' and table_id = '\x{}' and not expired and not deleted"#,
+            hex::encode(self.address),
+            hex::encode(self.table_id),
+        ));
+        res.push(")".to_string());
+        Ok(res.join(" "))
+    }
 
-        let mut pos = self.val_names.iter().position(|n| n == name)?;
-        let schema_type = field::Kind::from_schema_type(self.val_schema[4 + pos])?;
+    pub fn col_sql(&self, name: &str) -> Result<String, ApiError> {
+        if let Some(pos) = self.key_names.iter().position(|n| n == name) {
+            return Ok(format!("sdec(key, {}, 32) as {}", pos * 32, name));
+        }
+        let mut pos = self
+            .val_names
+            .iter()
+            .position(|n| n == name)
+            .ok_or(ApiError::User(format!("column '{}' not found", name)))?;
+
+        let schema_type = field::Kind::from_schema_type(self.val_schema[4 + pos]).unwrap();
         if matches!(schema_type, field::Kind::Static(_)) {
             pos = self
                 .val_schema
@@ -289,7 +516,7 @@ impl Schema {
                 .map(|b| field::Kind::from_schema_type(*b).unwrap().size().unwrap())
                 .sum()
         }
-        Some(schema_type.to_sql(pos, name))
+        Ok(schema_type.to_sql(pos, name))
     }
 }
 
@@ -311,172 +538,8 @@ mod schema_tests {
             ),
         };
         assert_eq!(
-            schema.get_col_sql("value").unwrap(),
+            schema.col_sql("value").unwrap(),
             "b2n(sdec(static_data, 0, 4)) as value"
         )
-    }
-}
-pub struct Data<'a> {
-    d: DynamicData<'a>,
-    s: &'a [u8],
-}
-
-impl<'a> Data<'a> {
-    pub fn new(
-        encoded_lengths: &'a FixedBytes<32>,
-        dynamic_data: &'a [u8],
-        static_data: &'a [u8],
-    ) -> Result<Self> {
-        Ok(Data {
-            d: DynamicData::new(dynamic_data, encoded_lengths)?,
-            s: static_data,
-        })
-    }
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct DynamicData<'a> {
-    f0: Option<&'a [u8]>,
-    f1: Option<&'a [u8]>,
-    f2: Option<&'a [u8]>,
-    f3: Option<&'a [u8]>,
-    f4: Option<&'a [u8]>,
-}
-
-impl<'a> DynamicData<'a> {
-    pub fn new(data: &'a [u8], el: &'a FixedBytes<32>) -> Result<Self> {
-        fn dec(s: &[u8]) -> usize {
-            s.into_iter().fold(0, |n, b| n << 8 | *b as usize)
-        }
-        let l4 = dec(&el[0..5]);
-        let l3 = dec(&el[5..10]);
-        let l2 = dec(&el[10..15]);
-        let l1 = dec(&el[15..20]);
-        let l0 = dec(&el[20..25]);
-        let total = dec(&el[25..32]);
-        if total != l0 + l1 + l2 + l3 + l4 {
-            return Err(eyre!("corrupt dynamic data"));
-        }
-        Ok(DynamicData {
-            f4: data.get(l3..l3 + l4).filter(|&sub| !sub.is_empty()),
-            f3: data.get(l2..l2 + l3).filter(|&sub| !sub.is_empty()),
-            f2: data.get(l1..l1 + l2).filter(|&sub| !sub.is_empty()),
-            f1: data.get(l0..l0 + l1).filter(|&sub| !sub.is_empty()),
-            f0: data.get(0..l0).filter(|&sub| !sub.is_empty()),
-        })
-    }
-}
-
-#[cfg(test)]
-mod dynamic_data_test {
-    use super::DynamicData;
-    use alloy::primitives::fixed_bytes;
-    #[test]
-    fn test_new_error() {
-        let el = &fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000020");
-        let dd = &[1u8; 32];
-        let dd = DynamicData::new(dd, el);
-        assert!(dd.is_err());
-    }
-    #[test]
-    fn test_new_empty() {
-        let el = &fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
-        let dd = &[0u8];
-        let dd = DynamicData::new(dd, el);
-        assert!(dd.is_ok());
-
-        let dd = dd.unwrap();
-        assert!(dd.f0.is_none());
-        assert!(dd.f1.is_none());
-        assert!(dd.f2.is_none());
-        assert!(dd.f3.is_none());
-        assert!(dd.f4.is_none());
-    }
-    #[test]
-    fn test_new_not_empty() {
-        let el = &fixed_bytes!("0000000000000000000000000000000000000000000000002000000000000020");
-        let dd = &[1u8; 32];
-        let dd = DynamicData::new(dd, el);
-        assert!(dd.is_ok());
-
-        let dd = dd.unwrap();
-        assert!(dd.f0.is_some());
-        assert!(dd.f1.is_none());
-        assert!(dd.f2.is_none());
-        assert!(dd.f3.is_none());
-        assert!(dd.f4.is_none());
-
-        assert_eq!(dd.f0.unwrap(), &[1u8; 32])
-    }
-}
-
-#[cfg(test)]
-mod pl_pgsql_test {
-    use alloy::primitives::fixed_bytes;
-    use postgresql_embedded::{PostgreSQL, Settings};
-    use tokio_postgres::{Client, NoTls};
-
-    static SCHEMA: &'static str = include_str!("./schema.sql");
-
-    async fn test_pg(cstr: &str) -> Client {
-        let (client, connection) = tokio_postgres::connect(cstr, NoTls)
-            .await
-            .expect("unable to start test database");
-        tokio::spawn(connection);
-        client
-            .batch_execute(SCHEMA)
-            .await
-            .expect("resetting schema");
-        client
-    }
-
-    #[tokio::test]
-    async fn test_ddec_empty() {
-        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-        let pg = test_pg(&db.settings().url("dozer-test")).await;
-
-        let encoded_lengths =
-            fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
-        let dynamic_data = &[0u8; 0];
-        let row = pg
-            .query_one("select ddec($1, $2, 0)", &[&encoded_lengths, &dynamic_data])
-            .await
-            .expect("issue with query");
-        let res: &[u8] = row.get(0);
-        assert_eq!(&[0u8; 0], res)
-    }
-
-    #[tokio::test]
-    async fn test_ddec() {
-        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-        let pg = test_pg(&db.settings().url("dozer-test")).await;
-
-        let encoded_lengths =
-            fixed_bytes!("0000000000000000000000000000000000000020000000004000000000000060");
-        let dynamic_data = &[1u8; 96];
-        let row = pg
-            .query_one("select ddec($1, $2, 0)", &[&encoded_lengths, &dynamic_data])
-            .await
-            .expect("issue with query");
-        let res: &[u8] = row.get(0);
-        assert_eq!(&[1u8; 64], res);
-
-        let row = pg
-            .query_one("select ddec($1, $2, 1)", &[&encoded_lengths, &dynamic_data])
-            .await
-            .expect("issue with query");
-        let res: &[u8] = row.get(0);
-        assert_eq!(&[1u8; 32], res)
     }
 }

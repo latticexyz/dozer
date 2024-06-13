@@ -1,4 +1,4 @@
-use crate::schema::{Data, Schema};
+use crate::{mud_encoding, mud_schema::Schema};
 
 use alloy::{
     primitives::{BlockHash, Bytes, FixedBytes, B256},
@@ -371,7 +371,7 @@ async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), Index
         let schema = &Schema::from_data(
             update.address,
             key,
-            &Data::new(encoded_lengths, &dynamic_data, &static_data)?,
+            &mud_encoding::Data::new(&static_data, *encoded_lengths, &dynamic_data)?,
         )?;
         schema
             .insert(pgtx, update.block_num, update.log_idx, update.address)
