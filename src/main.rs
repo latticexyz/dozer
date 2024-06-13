@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use deadpool_postgres::{Manager, ManagerConfig, Pool};
 use eyre::WrapErr;
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -20,7 +20,7 @@ use metrics_util::layers::Layer as MetricsUtilLayer;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
 use std::{future::ready, str::FromStr, time::Duration};
-use tokio;
+use tokio::{self};
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{
     layer::SubscriberExt, Layer as TracingSubscriberLayer, Registry as TracingSubscriberRegistry,
@@ -29,9 +29,15 @@ use url::Url;
 
 static SCHEMA: &'static str = include_str!("./schema.sql");
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
+#[derive(Parser)]
+#[command(name = "dozer", about = "An indexer for MUD", version = "0.1")]
+struct Dozer {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Parser)]
+struct ServerArgs {
     #[arg(long, env = "PG_URL", default_value = "postgres://localhost/dozer")]
     pg_url: String,
 
@@ -39,7 +45,7 @@ struct Args {
     eth_url: Url,
 
     #[arg(long, env = "RO_PASSWORD")]
-    ro_password: Option<String>,
+    ro_password: String,
 
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_index: bool,
@@ -54,24 +60,9 @@ struct Args {
     listen: String,
 }
 
-fn api_ro_pg(cstr: &str, ro_password: &str) -> Pool {
-    let mut pg_config = tokio_postgres::Config::from_str(cstr).expect("unable to connect to ro pg");
-    pg_config.user("uapi");
-    pg_config.password(ro_password);
-    let mut builder = SslConnector::builder(SslMethod::tls()).expect("tls builder");
-    builder.set_verify(SslVerifyMode::NONE);
-    let connector = MakeTlsConnector::new(builder.build());
-    let pg_mgr = Manager::from_config(
-        pg_config,
-        connector,
-        ManagerConfig {
-            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
-        },
-    );
-    Pool::builder(pg_mgr)
-        .max_size(16)
-        .build()
-        .expect("unable to build new ro pool")
+#[derive(Subcommand)]
+enum Commands {
+    Server(ServerArgs),
 }
 
 #[tokio::main]
@@ -99,8 +90,32 @@ async fn main() -> eyre::Result<()> {
         .with(MetricsLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    let args = Args::parse();
+    match Dozer::parse().command {
+        Commands::Server(args) => server(args).await,
+    }
+}
 
+fn api_ro_pg(cstr: &str, ro_password: &str) -> Pool {
+    let mut pg_config = tokio_postgres::Config::from_str(cstr).expect("unable to connect to ro pg");
+    pg_config.user("uapi");
+    pg_config.password(ro_password);
+    let mut builder = SslConnector::builder(SslMethod::tls()).expect("tls builder");
+    builder.set_verify(SslVerifyMode::NONE);
+    let connector = MakeTlsConnector::new(builder.build());
+    let pg_mgr = Manager::from_config(
+        pg_config,
+        connector,
+        ManagerConfig {
+            recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+        },
+    );
+    Pool::builder(pg_mgr)
+        .max_size(16)
+        .build()
+        .expect("unable to build new ro pool")
+}
+
+async fn server(args: ServerArgs) -> eyre::Result<()> {
     let mut builder = SslConnector::builder(SslMethod::tls()).expect("tls builder");
     builder.set_verify(SslVerifyMode::NONE);
     let connector = MakeTlsConnector::new(builder.build());
@@ -118,10 +133,7 @@ async fn main() -> eyre::Result<()> {
     }
 
     let config = api::Config {
-        pool: api_ro_pg(
-            &args.pg_url,
-            &args.ro_password.expect("missing read only pg password"),
-        ),
+        pool: api_ro_pg(&args.pg_url, &args.ro_password),
     };
 
     let prom_record = PrometheusBuilder::new()
