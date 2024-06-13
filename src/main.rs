@@ -33,7 +33,7 @@ static SCHEMA: &'static str = include_str!("./schema.sql");
 #[command(name = "dozer", about = "An indexer for MUD", version = "0.1")]
 struct Dozer {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Parser)]
@@ -91,7 +91,8 @@ async fn main() -> eyre::Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     match Dozer::parse().command {
-        Commands::Server(args) => server(args).await,
+        Some(Commands::Server(args)) => server(args).await,
+        None => server(ServerArgs::parse()).await,
     }
 }
 
