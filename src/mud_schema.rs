@@ -1,3 +1,5 @@
+use crate::api;
+
 use alloy::{
     hex,
     primitives::{b256, FixedBytes, B256},
@@ -9,10 +11,11 @@ use itertools::Itertools;
 use ruint::aliases::U64;
 use tokio_postgres::{Client, Row, Transaction};
 
-use crate::api_error::ApiError;
 use crate::mud_encoding;
 
 pub mod query {
+    use crate::api;
+
     use alloy::primitives::FixedBytes;
     use eyre::Result;
     use itertools::Itertools;
@@ -26,8 +29,6 @@ pub mod query {
         ops::ControlFlow,
     };
 
-    use crate::api_error::ApiError;
-
     use super::Schema;
 
     const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
@@ -36,12 +37,12 @@ pub mod query {
         pg: &tokio_postgres::Client,
         address: FixedBytes<20>,
         user_query: &str,
-    ) -> Result<String, ApiError> {
+    ) -> Result<String, api::Error> {
         let parsed_query =
-            Parser::parse_sql(PG, user_query).map_err(|e| ApiError::User(e.to_string()))?;
+            Parser::parse_sql(PG, user_query).map_err(|e| api::Error::User(e.to_string()))?;
         let mut schemas = load_schemas(pg, address, &parsed_query).await?;
         if schemas.len() == 0 {
-            return Err(ApiError::User("no tables found in query".to_string()));
+            return Err(api::Error::User("no tables found in query".to_string()));
         }
         build_sql(user_query, &parsed_query, &mut schemas)
     }
@@ -84,14 +85,14 @@ pub mod query {
         user_query: &str,
         parsed_query: &Vec<sqlparser::ast::Statement>,
         schemas: &mut Schemas,
-    ) -> Result<String, ApiError> {
+    ) -> Result<String, api::Error> {
         let col_search = visit_expressions(parsed_query, |expr| match expr {
             Expr::Identifier(id) => match schemas.values_mut().next() {
                 Some(s) => {
                     s.columns.insert(id.to_string());
                     ControlFlow::Continue(())
                 }
-                None => ControlFlow::Break(ApiError::User(format!(
+                None => ControlFlow::Break(api::Error::User(format!(
                     "no schemas found for {}",
                     id.to_string()
                 ))),
@@ -101,7 +102,7 @@ pub mod query {
                     s.columns.insert(id[1].to_string());
                     ControlFlow::Continue(())
                 }
-                None => ControlFlow::Break(ApiError::User(format!(
+                None => ControlFlow::Break(api::Error::User(format!(
                     "no schemas found for {}",
                     id[0].to_string()
                 ))),
@@ -475,7 +476,7 @@ impl Schema {
         String::from_utf8(b).unwrap()
     }
 
-    pub fn cte_sql(&self, columns: Vec<String>) -> Result<String, ApiError> {
+    pub fn cte_sql(&self, columns: Vec<String>) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
         res.push(format!("{} as (", self.table_name()));
         res.push("select".to_string());
@@ -496,7 +497,7 @@ impl Schema {
         Ok(res.join(" "))
     }
 
-    pub fn col_sql(&self, name: &str) -> Result<String, ApiError> {
+    pub fn col_sql(&self, name: &str) -> Result<String, api::Error> {
         if let Some(pos) = self.key_names.iter().position(|n| n == name) {
             return Ok(format!("sdec(key, {}, 32) as {}", pos * 32, name));
         }
@@ -504,7 +505,7 @@ impl Schema {
             .val_names
             .iter()
             .position(|n| n == name)
-            .ok_or(ApiError::User(format!("column '{}' not found", name)))?;
+            .ok_or(api::Error::User(format!("column '{}' not found", name)))?;
 
         let schema_type = field::Kind::from_schema_type(self.val_schema[4 + pos]).unwrap();
         if matches!(schema_type, field::Kind::Static(_)) {
