@@ -1,5 +1,44 @@
-use axum::http::StatusCode;
+use axum::{
+    extract::{rejection::JsonRejection, FromRequest, MatchedPath},
+    http::StatusCode,
+    RequestPartsExt,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+pub struct Json<T>(pub T);
+
+#[axum::async_trait]
+impl<S, T> FromRequest<S> for Json<T>
+where
+    axum::Json<T>: FromRequest<S, Rejection = JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, axum::Json<Value>);
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let (mut parts, body) = req.into_parts();
+        let path = parts
+            .extract::<MatchedPath>()
+            .await
+            .map(|path| path.as_str().to_owned())
+            .ok();
+
+        let req = axum::extract::Request::from_parts(parts, body);
+
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(value) => Ok(Self(value.0)),
+            Err(rejection) => {
+                let payload = json!({
+                    "message": rejection.body_text(),
+                    "origin": "custom_extractor",
+                    "path": path,
+                });
+                Err((rejection.status(), axum::Json(payload)))
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum ApiError {
