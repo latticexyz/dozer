@@ -1,4 +1,4 @@
-use alloy::primitives::FixedBytes;
+use alloy::primitives::{Address, FixedBytes};
 use axum::extract::State;
 use eyre::Context;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub enum Query {
 }
 #[derive(Deserialize, Serialize)]
 pub struct Request {
-    pub address: Option<FixedBytes<20>>,
+    pub address: Option<Address>,
     pub query: Query,
 }
 
@@ -70,9 +70,58 @@ pub async fn handle(
     }
 }
 
-fn add_address(address: Option<FixedBytes<20>>, sql: &mut String, params: &mut Vec<Box<Param>>) {
+fn add_address(address: Option<Address>, sql: &mut String, params: &mut Vec<Box<Param>>) {
     if let Some(a) = address {
         sql.push_str(" and address = $2");
-        params.push(Box::new(a));
+        params.push(Box::new(a.into_array()));
+    }
+}
+
+pub mod cli {
+    use alloy::{
+        hex::FromHex,
+        primitives::{Address, B256},
+    };
+    use clap::Args;
+    use eyre::Result;
+    use reqwest::Client;
+    use std::io::Write;
+    use url::Url;
+
+    use crate::{api::client_post, mud_schema};
+
+    #[derive(Args, Debug)]
+    pub struct Request {
+        #[clap(short, long, global = true, default_value = "http://0.0.0.0:8000")]
+        dozer_url: Url,
+
+        pub resource_id: String,
+
+        #[arg(short, long, env = "DOZER_ADDRESS")]
+        pub address: Option<Address>,
+    }
+
+    pub async fn request(http_client: &Client, targs: Request) -> Result<()> {
+        let req_body = if let Ok(table_id) = B256::from_hex(&targs.resource_id) {
+            super::Request {
+                address: targs.address,
+                query: super::Query::Id(table_id),
+            }
+        } else {
+            super::Request {
+                address: targs.address,
+                query: super::Query::Name(targs.resource_id),
+            }
+        };
+
+        let mut req_path = targs.dozer_url.clone();
+        req_path.set_path("/tables");
+
+        let res =
+            client_post::<Vec<mud_schema::Schema>, _>(&http_client, req_path, &req_body).await?;
+        let mut tw = tabwriter::TabWriter::new(std::io::stdout());
+        res.iter()
+            .for_each(|s| writeln!(tw, "{}", s.description()).expect("unable to write to stdout"));
+        Ok(())
     }
 }

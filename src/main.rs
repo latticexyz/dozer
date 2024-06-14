@@ -65,6 +65,7 @@ struct ServerArgs {
 #[derive(Subcommand)]
 enum Commands {
     Server(ServerArgs),
+    Table(api_tables::cli::Request),
 }
 
 #[tokio::main]
@@ -92,7 +93,11 @@ async fn main() -> eyre::Result<()> {
         .with(MetricsLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
-    match Dozer::parse().command {
+    let args = Dozer::parse();
+    let http_client = reqwest::Client::new();
+
+    match args.command {
+        Some(Commands::Table(args)) => api_tables::cli::request(&http_client, args).await,
         Some(Commands::Server(args)) => server(args).await,
         None => server(ServerArgs::parse()).await,
     }
