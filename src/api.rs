@@ -1,7 +1,6 @@
 use axum::{
-    extract::{rejection::JsonRejection, FromRequest, MatchedPath},
+    extract::{rejection::JsonRejection, FromRequest},
     http::StatusCode,
-    RequestPartsExt,
 };
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
@@ -25,25 +24,17 @@ where
     type Rejection = (StatusCode, axum::Json<Value>);
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        let (mut parts, body) = req.into_parts();
-        let path = parts
-            .extract::<MatchedPath>()
-            .await
-            .map(|path| path.as_str().to_owned())
-            .ok();
-
+        let (parts, body) = req.into_parts();
         let req = axum::extract::Request::from_parts(parts, body);
 
         match axum::Json::<T>::from_request(req, state).await {
             Ok(value) => Ok(Self(value.0)),
-            Err(rejection) => {
-                let payload = json!({
+            Err(rejection) => Err((
+                rejection.status(),
+                axum::Json(json!({
                     "message": rejection.body_text(),
-                    "origin": "custom_extractor",
-                    "path": path,
-                });
-                Err((rejection.status(), axum::Json(payload)))
-            }
+                })),
+            )),
         }
     }
 }
