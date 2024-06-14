@@ -1,6 +1,7 @@
 mod api;
 mod api_logs;
 mod api_sql;
+mod api_tables;
 mod indexer;
 mod mud_encoding;
 mod mud_schema;
@@ -176,6 +177,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             .route("/", get(|| async { "hello\n" }))
             .route("/metrics", get(move || ready(prom_handler.render())))
             .route("/q", post(api_sql::handle))
+            .route("/tables", post(api_tables::handle))
             .route("/api/logs", get(api_logs::handle))
             .layer(service)
             .with_state(config.clone()),
