@@ -9,7 +9,7 @@ use alloy::{
 use eyre::{Result, WrapErr};
 use itertools::Itertools;
 use ruint::aliases::U64;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_postgres::{Client, Row, Transaction};
 
 use crate::mud_encoding;
@@ -213,14 +213,41 @@ pub mod query {
 
 mod field {
     #[derive(Debug, PartialEq)]
+    pub enum Desc {
+        Address,
+        Bool,
+        Bytes,
+        Int,
+        Uint,
+    }
+    impl Desc {
+        fn to_string(&self) -> &'static str {
+            match self {
+                Desc::Address => "address",
+                Desc::Bool => "bool",
+                Desc::Bytes => "bytes",
+                Desc::Int => "int",
+                Desc::Uint => "uint",
+            }
+        }
+    }
+    #[derive(Debug, PartialEq)]
     pub enum Kind {
         Static(Static),
         Dynamic(Dynamic),
     }
     #[derive(Debug, PartialEq)]
     pub enum Static {
-        Numeric(usize),
-        Bytea(usize),
+        Num(u8, Desc),
+        Bytea(u8, Desc),
+    }
+    impl Static {
+        fn description(&self) -> String {
+            match self {
+                Static::Bytea(size, d) => format!("{}{}", d.to_string(), size),
+                Static::Num(size, d) => format!("{}{}", d.to_string(), size),
+            }
+        }
     }
     #[derive(Debug, PartialEq)]
     pub enum Dynamic {
@@ -228,19 +255,28 @@ mod field {
         Text,
         Array(Static),
     }
+    impl Dynamic {
+        fn description(&self) -> String {
+            match self {
+                Dynamic::Bytea => String::from("bytes"),
+                Dynamic::Text => String::from("string"),
+                Dynamic::Array(s) => s.description(),
+            }
+        }
+    }
     impl Kind {
         pub fn from_schema_type(t: u8) -> Option<Self> {
             Some(match t {
-                n if t < 32 => Kind::Static(Static::Numeric(n as usize + 1)),
-                n if t < 64 => Kind::Static(Static::Numeric(n as usize - 31)),
-                n if t < 96 => Kind::Static(Static::Bytea(n as usize - 63)),
-                _ if t == 96 => Kind::Static(Static::Bytea(1)),
-                _ if t == 97 => Kind::Static(Static::Bytea(20)),
-                n if t < 130 => Kind::Dynamic(Dynamic::Array(Static::Numeric(n as usize - 97))),
-                n if t < 162 => Kind::Dynamic(Dynamic::Array(Static::Numeric(n as usize - 129))),
-                n if t < 194 => Kind::Dynamic(Dynamic::Array(Static::Bytea(n as usize - 161))),
-                _ if t == 194 => Kind::Dynamic(Dynamic::Array(Static::Bytea(1))),
-                _ if t == 195 => Kind::Dynamic(Dynamic::Array(Static::Bytea(20))),
+                n if t < 32 => Kind::Static(Static::Num(n + 1, Desc::Uint)),
+                n if t < 64 => Kind::Static(Static::Num(n - 31, Desc::Int)),
+                n if t < 96 => Kind::Static(Static::Bytea(n - 63, Desc::Bytes)),
+                _ if t == 96 => Kind::Static(Static::Bytea(1, Desc::Bool)),
+                _ if t == 97 => Kind::Static(Static::Bytea(20, Desc::Address)),
+                n if t < 130 => Kind::Dynamic(Dynamic::Array(Static::Num(n - 97, Desc::Uint))),
+                n if t < 162 => Kind::Dynamic(Dynamic::Array(Static::Num(n - 129, Desc::Int))),
+                n if t < 194 => Kind::Dynamic(Dynamic::Array(Static::Bytea(n - 161, Desc::Bytes))),
+                _ if t == 194 => Kind::Dynamic(Dynamic::Array(Static::Bytea(1, Desc::Bool))),
+                _ if t == 195 => Kind::Dynamic(Dynamic::Array(Static::Bytea(20, Desc::Address))),
                 _ if t == 196 => Kind::Dynamic(Dynamic::Bytea),
                 _ if t == 197 => Kind::Dynamic(Dynamic::Text),
                 _ => return None,
@@ -249,18 +285,27 @@ mod field {
 
         pub fn size(&self) -> Option<usize> {
             match self {
-                Kind::Static(Static::Bytea(s)) | Kind::Static(Static::Numeric(s)) => Some(*s),
+                Kind::Static(Static::Bytea(s, _)) | Kind::Static(Static::Num(s, _)) => {
+                    Some(*s as usize)
+                }
                 Kind::Dynamic(_) => None,
+            }
+        }
+
+        pub fn description(&self) -> String {
+            match self {
+                Kind::Static(s) => s.description(),
+                Kind::Dynamic(d) => d.description(),
             }
         }
 
         pub fn to_sql(&self, pos: usize, name: &str) -> String {
             match self {
                 Kind::Static(t) => match t {
-                    Static::Numeric(size) => {
+                    Static::Num(size, _) => {
                         format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
                     }
-                    Static::Bytea(size) => {
+                    Static::Bytea(size, _) => {
                         format!("sdec(static_data, {}, {}) as {}", pos, size, name)
                     }
                 },
@@ -275,13 +320,13 @@ mod field {
                         )
                     }
                     Dynamic::Array(it) => match it {
-                        Static::Bytea(size) => {
+                        Static::Bytea(size, _) => {
                             format!(
                                 "b2ab(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
                                 pos, size, name
                             )
                         }
-                        Static::Numeric(size) => {
+                        Static::Num(size, _) => {
                             format!(
                                 "b2an(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
                                 pos, size, name
@@ -298,54 +343,54 @@ mod field {
         #[test]
         fn test_from_schema_type() {
             assert_eq!(
-                Kind::Static(Static::Numeric(32)),
+                Kind::Static(Static::Num(32, Desc::Uint)),
                 Kind::from_schema_type(0x1F).unwrap()
             );
             assert_eq!(
-                Kind::Static(Static::Numeric(32)),
+                Kind::Static(Static::Num(32, Desc::Int)),
                 Kind::from_schema_type(0x3f).unwrap()
             );
             assert_eq!(
-                Kind::Static(Static::Bytea(32)),
+                Kind::Static(Static::Bytea(32, Desc::Bytes)),
                 Kind::from_schema_type(0x5f).unwrap()
             );
             assert_eq!(
-                Kind::Static(Static::Bytea(1)),
+                Kind::Static(Static::Bytea(1, Desc::Bool)),
                 Kind::from_schema_type(0x60).unwrap()
             );
             assert_eq!(
-                Kind::Static(Static::Bytea(20)),
+                Kind::Static(Static::Bytea(20, Desc::Address)),
                 Kind::from_schema_type(0x61).unwrap()
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))),
+                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))),
                 Kind::from_schema_type(0x81).unwrap()
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))),
+                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Int))),
                 Kind::from_schema_type(0xA1).unwrap()
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Bytea(32))),
+                Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))),
                 Kind::from_schema_type(0xC1).unwrap()
             );
         }
         #[test]
         fn test_to_sql() {
             assert_eq!(
-                Kind::Static(Static::Numeric(32)).to_sql(1, "foo"),
+                Kind::Static(Static::Num(32, Desc::Uint)).to_sql(1, "foo"),
                 "b2n(sdec(static_data, 1, 32)) as foo"
             );
             assert_eq!(
-                Kind::Static(Static::Bytea(32)).to_sql(1, "foo"),
+                Kind::Static(Static::Bytea(32, Desc::Bytes)).to_sql(1, "foo"),
                 "sdec(static_data, 1, 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Bytea(32))).to_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))).to_sql(0, "foo"),
                 "b2ab(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))).to_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))).to_sql(0, "foo"),
                 "b2an(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
             );
             assert_eq!(
@@ -359,17 +404,17 @@ mod field {
         }
         #[test]
         fn test_size() {
-            assert_eq!(Kind::Static(Static::Bytea(1)).size(), Some(1));
-            assert_eq!(Kind::Static(Static::Numeric(32)).size(), Some(32));
+            assert_eq!(Kind::Static(Static::Bytea(1, Desc::Bytes)).size(), Some(1));
+            assert_eq!(Kind::Static(Static::Num(32, Desc::Uint)).size(), Some(32));
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Numeric(32))).size(),
+                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))).size(),
                 None
             );
         }
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Schema {
     pub address: FixedBytes<20>,
     pub table_id: FixedBytes<32>,
@@ -466,6 +511,25 @@ impl Schema {
         .await
         .map(|_| ())
         .wrap_err("inserting new table")
+    }
+
+    pub fn description(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("{}", self.table_name()));
+        lines.push(format!("\tId:\t{}", self.table_id));
+        lines.push(format!("\tAddress:\t{}", self.address));
+        lines.push("\n\tKeys:".to_string());
+        lines.extend(self.key_names.iter().enumerate().map(|(i, key_name)| {
+            let kind = field::Kind::from_schema_type(self.key_schema[4 + i]).unwrap();
+            format!("\t\t{}\t{}", key_name, kind.description())
+        }));
+        lines.push("\n\tValues:".to_string());
+        lines.extend(self.val_names.iter().enumerate().map(|(i, val_name)| {
+            let kind = field::Kind::from_schema_type(self.val_schema[4 + i]).unwrap();
+            format!("\t\t{}\t{}", val_name, kind.description())
+        }));
+        lines.push("\r".to_string());
+        lines.join("\n")
     }
 
     pub fn table_name(&self) -> String {

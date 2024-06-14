@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     RequestPartsExt,
 };
+use eyre::eyre;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -47,9 +48,11 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 pub enum Error {
     User(String),
+
+    #[serde(skip)]
     Server(Box<dyn std::error::Error + Send + Sync>),
 }
 
@@ -93,4 +96,29 @@ impl From<eyre::Report> for Error {
     fn from(value: eyre::Report) -> Self {
         Error::Server(value.into())
     }
+}
+
+pub async fn client_post<T, U>(
+    client: &reqwest::Client,
+    url: url::Url,
+    request_body: &U,
+) -> eyre::Result<T>
+where
+    T: for<'de> serde::Deserialize<'de>,
+    U: serde::Serialize,
+{
+    let response = client.post(url).json(request_body).send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+
+    if let Ok(r) = serde_json::from_str::<T>(&body) {
+        return Ok(r);
+    }
+    if let Ok(err) = serde_json::from_str::<ErrorMessage>(&body) {
+        return Err(eyre!(err.msg));
+    }
+    if body.is_empty() {
+        return Err(eyre!("status: {}", status));
+    }
+    Err(eyre!("status: {} body:\n{}", status, body))
 }
