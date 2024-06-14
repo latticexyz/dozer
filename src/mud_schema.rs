@@ -9,6 +9,7 @@ use alloy::{
 use eyre::{Result, WrapErr};
 use itertools::Itertools;
 use ruint::aliases::U64;
+use serde::Serialize;
 use tokio_postgres::{Client, Row, Transaction};
 
 use crate::mud_encoding;
@@ -368,7 +369,7 @@ mod field {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Schema {
     pub address: FixedBytes<20>,
     pub table_id: FixedBytes<32>,
@@ -404,7 +405,7 @@ impl Schema {
         })
     }
 
-    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
+    pub fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
         Ok(Schema {
             address: row.try_get("address")?,
             table_id: row.try_get("id")?,
@@ -427,7 +428,7 @@ impl Schema {
                 from tables
                 where address = $1
                 and name = ANY($2)
-                "#,
+            "#,
             &[&address, &tables],
         )
         .await?
