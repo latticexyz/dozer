@@ -515,9 +515,10 @@ impl Schema {
 
     pub fn description(&self) -> String {
         let mut lines = Vec::new();
-        lines.push(format!("{}", self.table_name()));
+        lines.push(format!("Name: {}", self.table_name()));
         lines.push(format!("\tId:\t{}", self.table_id));
         lines.push(format!("\tAddress:\t{}", self.address));
+        lines.push(format!("\tNamespace:\t{}", self.namespace()));
         lines.push("\n\tKeys:".to_string());
         lines.extend(self.key_names.iter().enumerate().map(|(i, key_name)| {
             let kind = field::Kind::from_schema_type(self.key_schema[4 + i]).unwrap();
@@ -530,6 +531,15 @@ impl Schema {
         }));
         lines.push("\r".to_string());
         lines.join("\n")
+    }
+
+    pub fn namespace(&self) -> String {
+        let b: Vec<u8> = self.table_id[2..15]
+            .iter()
+            .map(|c| *c)
+            .filter(|c| *c > 0 && *c < 255) //ascii table names
+            .collect();
+        String::from_utf8(b).unwrap()
     }
 
     pub fn table_name(&self) -> String {
