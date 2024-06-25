@@ -718,7 +718,7 @@ mod tests {
     static SCHEMA: &'static str = include_str!("./schema.sql");
 
     use alloy::primitives::{Address, LogData, B256};
-    use postgresql_embedded::{PostgreSQL, Settings};
+    use postgresql_embedded::{PostgreSQL, Settings, Version};
     use tokio_postgres::NoTls;
     use tracing_subscriber::FmtSubscriber;
 
@@ -737,8 +737,16 @@ mod tests {
         });
     }
 
-    async fn test_pg(cstr: &str) -> Client {
-        let (client, connection) = tokio_postgres::connect(cstr, NoTls)
+    async fn test_pg() -> (PostgreSQL, Client) {
+        let mut pg_settings = Settings::default();
+        pg_settings.version = Version::new(16, Some(2), Some(3));
+        let mut db = PostgreSQL::new(pg_settings);
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("dozer-test")
+            .await
+            .expect("creating test db");
+        let (client, connection) = tokio_postgres::connect(&db.settings().url("dozer-test"), NoTls)
             .await
             .expect("unable to start test database");
         tokio::spawn(connection);
@@ -746,7 +754,7 @@ mod tests {
             .batch_execute(SCHEMA)
             .await
             .expect("resetting schema");
-        client
+        (db, client)
     }
 
     fn test_block(num: u64, hash: u8, parent: u8) -> Block {
@@ -852,14 +860,7 @@ mod tests {
     #[tokio::test]
     async fn test_index() {
         logging();
-        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-
-        let mut pg = test_pg(&db.settings().url("dozer-test")).await;
+        let (_pg_server, mut pg) = test_pg().await;
         pg.execute(
             "insert into blocks(num, hash) values ($1, $2)",
             &[&U64::from(0), &FixedBytes::<32>::ZERO],
@@ -932,14 +933,7 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index() {
         logging();
-        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-
-        let mut pg = test_pg(&db.settings().url("dozer-test")).await;
+        let (_pg_server, mut pg) = test_pg().await;
         let pgtx = pg.transaction().await.expect("opening index tx");
         pgtx.execute(
             "insert into blocks(num, hash) values ($1, $2)",
@@ -960,15 +954,7 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index_reorg() {
         logging();
-        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-
-        let mut pg = test_pg(&db.settings().url("dozer-test")).await;
-
+        let (_pg_server, mut pg) = test_pg().await;
         let pgtx = pg.transaction().await.expect("opening index tx");
 
         pgtx.execute(

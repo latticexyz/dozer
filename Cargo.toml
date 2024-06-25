@@ -15,7 +15,7 @@
     async-trait = "0.1"
     axum = "0.7.5"
     clap = { version = "4.5.4", features = ["derive", "env"] }
-    deadpool-postgres = "0.13.2"
+    deadpool-postgres = "0.14"
     eyre = "0.6.12"
     futures = "0.3"
     itertools = "0.13"
@@ -29,7 +29,7 @@
     ruint = { version = "1.12.1", features = ["postgres"] }
     serde = { version = "1", features = ["derive"] }
     serde_json = { version = "1" }
-    sqlparser = { version = "0.46", features = ["visitor"] }
+    sqlparser = { version = "0.47", features = ["visitor"] }
     tabwriter = "1.4.0"
     tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
     tokio-postgres = { version = "0.7.10", features = ["array-impls"] }
@@ -47,4 +47,4 @@
     url = "2.5"
 
 [dev-dependencies]
-    postgresql_embedded = "0.9"
+    postgresql_embedded = "0.12"
