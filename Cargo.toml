@@ -4,17 +4,13 @@
     version = "0.1.0"
 
 [dependencies]
-    alloy = { git = "https://github.com/alloy-rs/alloy", rev = "0f97116", features = [
+    alloy = { version = "0.1", features = [
         "contract",
-        "network",
         "postgres",
-        "provider-http",
         "providers",
-        "rpc",
         "rpc-client",
         "rpc-types-eth",
         "serde",
-        "sol-types",
     ] }
     async-trait = "0.1"
     axum = "0.7.5"
