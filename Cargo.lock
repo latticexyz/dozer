@@ -1225,10 +1225,11 @@ dependencies = [
 
 [[package]]
 name = "deadpool-postgres"
-version = "0.13.2"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19be9da496d60d03ec3ab45d960d80a3afb285b787394b83614a79942f467e7f"
+checksum = "1ab8a4ea925ce79678034870834602a2980f4b88c09e97feb266496dbb4493d2"
 dependencies = [
+ "async-trait",
  "deadpool",
  "getrandom",
  "tokio",
@@ -2664,9 +2665,9 @@ dependencies = [
 
 [[package]]
 name = "postgresql_archive"
-version = "0.9.5"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46e5fbe4c6db9cfd2f5cec2a2debd7a251554c21e976befb0f98d300dbfd8b7c"
+checksum = "2b8b9fbf62821a2511020cf1bb62798409b99288ecc47d8f74bf4eb7eb87206a"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2695,9 +2696,9 @@ dependencies = [
 
 [[package]]
 name = "postgresql_commands"
-version = "0.9.5"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9890abe6db21a13f66073ae23d4b9c9cbca21897b5aec01930ef5bbd3d4f954a"
+checksum = "f11eb0c1eb6fe5f7cc831d3327d5d59b3d4742c04aa4f4aa4177ae71e96bfcd9"
 dependencies = [
  "anyhow",
  "thiserror",
@@ -2706,9 +2707,9 @@ dependencies = [
 
 [[package]]
 name = "postgresql_embedded"
-version = "0.9.5"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ef0577df3599630c970171b31cd9da24f11816585ab6a6dc93567d3335f63fe"
+checksum = "0b5255726100fc9513e95887893525cd3f75ac9767abf19fa96db9474e5c1a71"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3566,9 +3567,9 @@ dependencies = [
 
 [[package]]
 name = "sqlparser"
-version = "0.46.0"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11a81a8cad9befe4cf1b9d2d4b9c6841c76f0882a3fec00d95133953c13b3d3d"
+checksum = "295e9930cd7a97e58ca2a070541a3ca502b17f5d1fa7157376d0fabd85324f25"
 dependencies = [
  "log",
  "sqlparser_derive",

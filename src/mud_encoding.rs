@@ -103,13 +103,21 @@ mod dynamic_data_test {
 #[cfg(test)]
 mod pl_pgsql_test {
     use alloy::primitives::fixed_bytes;
-    use postgresql_embedded::{PostgreSQL, Settings};
+    use postgresql_embedded::{PostgreSQL, Settings, Version};
     use tokio_postgres::{Client, NoTls};
 
     static SCHEMA: &'static str = include_str!("./schema.sql");
 
-    async fn test_pg(cstr: &str) -> Client {
-        let (client, connection) = tokio_postgres::connect(cstr, NoTls)
+    async fn test_pg() -> (PostgreSQL, Client) {
+        let mut pg_settings = Settings::default();
+        pg_settings.version = Version::new(16, Some(2), Some(3));
+        let mut db = PostgreSQL::new(pg_settings);
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("dozer-test")
+            .await
+            .expect("creating test db");
+        let (client, connection) = tokio_postgres::connect(&db.settings().url("dozer-test"), NoTls)
             .await
             .expect("unable to start test database");
         tokio::spawn(connection);
@@ -117,19 +125,12 @@ mod pl_pgsql_test {
             .batch_execute(SCHEMA)
             .await
             .expect("resetting schema");
-        client
+        (db, client)
     }
 
     #[tokio::test]
     async fn test_ddec_empty() {
-        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-        let pg = test_pg(&db.settings().url("dozer-test")).await;
-
+        let (_pg_server, pg) = test_pg().await;
         let encoded_lengths =
             fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
         let dynamic_data = &[0u8; 0];
@@ -143,14 +144,7 @@ mod pl_pgsql_test {
 
     #[tokio::test]
     async fn test_ddec() {
-        let mut db = PostgreSQL::new("16.2.3".parse().unwrap(), Settings::default());
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-        let pg = test_pg(&db.settings().url("dozer-test")).await;
-
+        let (_pg_server, pg) = test_pg().await;
         let encoded_lengths =
             fixed_bytes!("0000000000000000000000000000000000000020000000004000000000000060");
         let dynamic_data = &[1u8; 96];
