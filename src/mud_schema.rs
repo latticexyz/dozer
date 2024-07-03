@@ -414,7 +414,7 @@ mod field {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Schema {
     pub address: FixedBytes<20>,
     pub table_id: FixedBytes<32>,
@@ -448,6 +448,13 @@ impl Schema {
             key_names: SolArrayOf::<sol!(string)>::abi_decode(key_names, false)?,
             val_names: SolArrayOf::<sol!(string)>::abi_decode(val_names, false)?,
         })
+    }
+
+    pub fn set_name(&mut self, name: &str) {
+        let mut name = name.as_bytes().to_vec();
+        name.truncate(16);
+        name.resize(16, 0);
+        self.table_id[16..].copy_from_slice(&name);
     }
 
     pub fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {

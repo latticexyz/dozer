@@ -1,5 +1,5 @@
-- cli for sql queries
 - narrow sql query interface
+- cli for sql queries
 
 - add point-in-time records query
 - rpc client timeouts
