@@ -1,13 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use eyre::Result;
 use itertools::Itertools;
 use sqlparser::{ast, dialect::PostgreSqlDialect, parser::Parser};
 
-use crate::{
-    api,
-    mud_schema::{self, Schema},
-};
+use crate::{api, mud_schema};
 
 const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
 
@@ -17,12 +14,28 @@ macro_rules! no {
     };
 }
 
-pub struct Validator {
-    schemas: HashMap<String, mud_schema::Schema>,
+struct Validator {
+    pub schemas: HashMap<String, mud_schema::Schema>,
+}
+
+pub fn validate(
+    query: &str,
+    schemas: Vec<mud_schema::Schema>,
+) -> Result<Vec<mud_schema::Schema>, api::Error> {
+    let schemas = schemas
+        .into_iter()
+        .map(|mut s| {
+            s.select_list = Some(HashSet::new());
+            (s.table_name(), s)
+        })
+        .collect();
+    let mut validator = Validator { schemas };
+    validator.validate(query)?;
+    Ok(validator.schemas.into_iter().map(|(_, v)| v).collect())
 }
 
 impl Validator {
-    pub fn validate(&self, query: &str) -> Result<(), api::Error> {
+    fn validate(&mut self, query: &str) -> Result<(), api::Error> {
         let stmts = Parser::parse_sql(PG, query).map_err(|e| api::Error::User(e.to_string()))?;
         for stmt in stmts.iter() {
             match stmt {
@@ -33,7 +46,7 @@ impl Validator {
         Ok(())
     }
 
-    fn validate_query(&self, query: &ast::Query) -> Result<(), api::Error> {
+    fn validate_query(&mut self, query: &ast::Query) -> Result<(), api::Error> {
         match query {
             ast::Query { with: Some(_), .. } => no!("with"),
             ast::Query { locks, .. } if locks.len() > 0 => no!("for update"),
@@ -41,14 +54,14 @@ impl Validator {
         }
     }
 
-    fn validate_query_body(&self, body: &ast::SetExpr) -> Result<(), api::Error> {
+    fn validate_query_body(&mut self, body: &ast::SetExpr) -> Result<(), api::Error> {
         match body {
             ast::SetExpr::Select(select_query) => self.validate_select(select_query),
             _ => no!("invalid query body"),
         }
     }
 
-    fn validate_select(&self, select: &ast::Select) -> Result<(), api::Error> {
+    fn validate_select(&mut self, select: &ast::Select) -> Result<(), api::Error> {
         match select {
             ast::Select { top: Some(_), .. } => no!("top"),
             ast::Select { into: Some(_), .. } => no!("into"),
@@ -97,7 +110,10 @@ impl Validator {
                         ast::SelectItem::ExprWithAlias { expr, alias: _ } => {
                             self.validate_expression(expr)
                         }
-                        _ => no!(projection_item),
+                        _ => {
+                            println!("projection: {:?}", projection_item);
+                            no!(projection_item)
+                        }
                     }?;
                 }
                 self.validate_expressions(&sort_by)?;
@@ -109,14 +125,14 @@ impl Validator {
         }
     }
 
-    fn validate_expressions(&self, exprs: &[ast::Expr]) -> Result<(), api::Error> {
+    fn validate_expressions(&mut self, exprs: &[ast::Expr]) -> Result<(), api::Error> {
         for expr in exprs.iter() {
             self.validate_expression(expr)?;
         }
         Ok(())
     }
 
-    fn validate_expression(&self, expr: &ast::Expr) -> Result<(), api::Error> {
+    fn validate_expression(&mut self, expr: &ast::Expr) -> Result<(), api::Error> {
         match expr {
             ast::Expr::Identifier(id) => self.validate_column(id),
             ast::Expr::CompoundIdentifier(ids) => self.validate_compound_column(ids),
@@ -132,11 +148,15 @@ impl Validator {
             ast::Expr::Exists { subquery, .. } => self.validate_query(subquery),
             ast::Expr::Subquery(subquery) => self.validate_query(subquery),
             ast::Expr::Tuple(exprs) => self.validate_expressions(exprs),
+            ast::Expr::BinaryOp { left, right, .. } => {
+                self.validate_expression(left)?;
+                self.validate_expression(right)
+            }
             _ => no!(expr),
         }
     }
 
-    fn validate_compound_column(&self, id: &Vec<ast::Ident>) -> Result<(), api::Error> {
+    fn validate_compound_column(&mut self, id: &Vec<ast::Ident>) -> Result<(), api::Error> {
         let (table_name, col_name) = match id.len() {
             3 => (id[0..2].iter().join("."), id[2].to_string()),
             2 => (id[0].to_string(), id[1].to_string()),
@@ -147,9 +167,13 @@ impl Validator {
                 )))
             }
         };
-        match self.schemas.get(&table_name) {
+        match self.schemas.get_mut(&table_name) {
             Some(schema) => {
                 if schema.val_names.iter().any(|v| *v == col_name) {
+                    schema
+                        .select_list
+                        .as_mut()
+                        .and_then(|sl| Some(sl.insert(col_name)));
                     Ok(())
                 } else {
                     return Err(api::Error::User(format!(
@@ -167,7 +191,7 @@ impl Validator {
         }
     }
 
-    fn validate_column(&self, id: &ast::Ident) -> Result<(), api::Error> {
+    fn validate_column(&mut self, id: &ast::Ident) -> Result<(), api::Error> {
         let matched_schemas: Vec<&mud_schema::Schema> = self
             .schemas
             .values()
@@ -179,7 +203,16 @@ impl Validator {
             })
             .collect();
         match matched_schemas.len() {
-            1 => Ok(()),
+            1 => {
+                let table_name = matched_schemas.first().unwrap().table_name();
+                if let Some(schema) = self.schemas.get_mut(&table_name) {
+                    schema
+                        .select_list
+                        .as_mut()
+                        .and_then(|sl| Some(sl.insert(id.value.to_string())));
+                }
+                Ok(())
+            }
             0 => Err(api::Error::User(format!(
                 "column {} not found in {}",
                 id.value,
@@ -243,7 +276,7 @@ mod tests {
     use super::*;
 
     fn check_query(schemas: Vec<mud_schema::Schema>, query: &str, want: Option<&str>) {
-        let v = Validator {
+        let mut v = Validator {
             schemas: schemas.into_iter().map(|s| (s.table_name(), s)).collect(),
         };
         match want {
@@ -269,9 +302,29 @@ mod tests {
 
     fn test_schema(table_name: &str, cols: Vec<&str>) -> mud_schema::Schema {
         let mut s = mud_schema::Schema::default();
-        s.set_name(table_name);
+
+        let mut name = table_name.as_bytes().to_vec();
+        name.truncate(16);
+        name.resize(16, 0);
+        s.table_id[16..].copy_from_slice(&name);
+
         s.val_names.extend(cols.into_iter().map(|s| s.to_string()));
         s
+    }
+
+    #[test]
+    fn test_select_list() {
+        let schemas = validate("select c from foo", vec![test_schema("foo", vec!["c"])])
+            .expect("validating query");
+        assert_eq!(schemas.len(), 1);
+
+        let select_list = schemas[0]
+            .select_list
+            .as_ref()
+            .expect("no select list")
+            .into_iter()
+            .collect_vec();
+        assert_eq!(select_list, vec!["c"]);
     }
 
     #[test]
@@ -285,6 +338,11 @@ mod tests {
             (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
                 "select foo.c, bar.c from foo, bar",
+                None,
+            ),
+            (
+                vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
+                "select foo.c, bar.c from foo, bar where foo.c = bar.c",
                 None,
             ),
         ]

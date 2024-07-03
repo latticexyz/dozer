@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::api;
 
 use alloy::{
@@ -15,20 +17,13 @@ use tokio_postgres::{Client, Row, Transaction};
 use crate::mud_encoding;
 
 pub mod query {
-    use crate::api;
+    use crate::{api, validate_sql};
 
     use alloy::primitives::FixedBytes;
     use eyre::Result;
     use itertools::Itertools;
-    use sqlparser::{
-        ast::{visit_expressions, visit_relations, Expr},
-        dialect::PostgreSqlDialect,
-        parser::Parser,
-    };
-    use std::{
-        collections::{HashMap, HashSet},
-        ops::ControlFlow,
-    };
+    use sqlparser::{ast::visit_relations, dialect::PostgreSqlDialect, parser::Parser};
+    use std::{collections::HashSet, ops::ControlFlow};
 
     use super::Schema;
 
@@ -41,88 +36,35 @@ pub mod query {
     ) -> Result<String, api::Error> {
         let parsed_query =
             Parser::parse_sql(PG, user_query).map_err(|e| api::Error::User(e.to_string()))?;
-        let mut schemas = load_schemas(pg, address, &parsed_query).await?;
+        let schemas = load_schemas(pg, address, &parsed_query).await?;
         if schemas.len() == 0 {
             return Err(api::Error::User("no tables found in query".to_string()));
         }
-        build_sql(user_query, &parsed_query, &mut schemas)
+        build_sql(user_query, schemas)
     }
-
-    struct SelectItem {
-        schema: Schema,
-        columns: HashSet<String>,
-    }
-
-    type Schemas = HashMap<String, SelectItem>;
 
     async fn load_schemas(
         pg: &tokio_postgres::Client,
         address: FixedBytes<20>,
         query: &Vec<sqlparser::ast::Statement>,
-    ) -> Result<Schemas> {
+    ) -> Result<Vec<Schema>, api::Error> {
         let mut table_names = HashSet::new();
         visit_relations(query, |relation| {
             table_names.insert(relation.to_string());
             ControlFlow::<()>::Continue(())
         });
-        Ok(
-            Schema::from_pg(pg, address, table_names.into_iter().collect())
-                .await?
-                .into_iter()
-                .map(|s| {
-                    (
-                        s.table_name(),
-                        SelectItem {
-                            schema: s,
-                            columns: HashSet::new(),
-                        },
-                    )
-                })
-                .collect(),
-        )
+        Ok(Schema::from_pg(pg, address, table_names.into_iter().collect()).await?)
     }
 
-    fn build_sql(
-        user_query: &str,
-        parsed_query: &Vec<sqlparser::ast::Statement>,
-        schemas: &mut Schemas,
-    ) -> Result<String, api::Error> {
-        let col_search = visit_expressions(parsed_query, |expr| match expr {
-            Expr::Identifier(id) => match schemas.values_mut().next() {
-                Some(s) => {
-                    s.columns.insert(id.to_string());
-                    ControlFlow::Continue(())
-                }
-                None => ControlFlow::Break(api::Error::User(format!(
-                    "no schemas found for {}",
-                    id.to_string()
-                ))),
-            },
-            Expr::CompoundIdentifier(id) => match schemas.get_mut(&id[0].to_string()) {
-                Some(s) => {
-                    s.columns.insert(id[1].to_string());
-                    ControlFlow::Continue(())
-                }
-                None => ControlFlow::Break(api::Error::User(format!(
-                    "no schemas found for {}",
-                    id[0].to_string()
-                ))),
-            },
-            _ => ControlFlow::Continue(()),
-        });
-        if let ControlFlow::Break(err) = col_search {
-            return Err(err);
-        }
-        let mut query = Vec::new();
+    fn build_sql(user_query: &str, schemas: Vec<Schema>) -> Result<String, api::Error> {
+        let schemas = validate_sql::validate(user_query, schemas)?;
+        let mut query: Vec<String> = Vec::new();
         query.push("with".to_string());
         query.push(
             schemas
-                .values()
-                .sorted_by_key(|s| s.schema.table_name())
-                .map(|s| {
-                    s.schema
-                        .cte_sql(s.columns.clone().into_iter().collect_vec())
-                })
+                .iter()
+                .sorted_by_key(|s| s.table_name())
+                .map(|s| s.cte_sql())
                 .collect::<Result<Vec<_>, _>>()?
                 .join(","),
         );
@@ -147,45 +89,34 @@ pub mod query {
             );
             let pq = build_sql(
                 &user_query,
-                &Parser::parse_sql(PG, &user_query).unwrap(),
-                &mut HashMap::from([
-                    (
-                        String::from("foo"),
-                        SelectItem {
-                            columns: HashSet::new(),
-                            schema: Schema {
-                                address: fixed_bytes!(),
-                                table_id: fixed_bytes!(
-                                "74620000000000000000000000000000666f6f00000000000000000000000000"
-                            ),
-                                key_names: vec![],
-                                val_names: vec![String::from("value")],
-                                key_schema: fixed_bytes!(),
-                                val_schema: fixed_bytes!(
-                                "0004010003000000000000000000000000000000000000000000000000000000"
-                            ),
-                            },
-                        },
-                    ),
-                    (
-                        String::from("bar"),
-                        SelectItem {
-                            columns: HashSet::new(),
-                            schema: Schema {
-                                address: fixed_bytes!(),
-                                table_id: fixed_bytes!(
-                                "7462000000000000000000000000000062617200000000000000000000000000"
-                            ),
-                                key_names: vec![],
-                                val_names: vec![String::from("value")],
-                                key_schema: fixed_bytes!(),
-                                val_schema: fixed_bytes!(
-                                "0004010003000000000000000000000000000000000000000000000000000000"
-                            ),
-                            },
-                        },
-                    ),
-                ]),
+                vec![
+                    Schema {
+                        address: fixed_bytes!(),
+                        table_id: fixed_bytes!(
+                            "74620000000000000000000000000000666f6f00000000000000000000000000"
+                        ),
+                        key_names: vec![],
+                        val_names: vec![String::from("value")],
+                        key_schema: fixed_bytes!(),
+                        val_schema: fixed_bytes!(
+                            "0004010003000000000000000000000000000000000000000000000000000000"
+                        ),
+                        select_list: None,
+                    },
+                    Schema {
+                        address: fixed_bytes!(),
+                        table_id: fixed_bytes!(
+                            "7462000000000000000000000000000062617200000000000000000000000000"
+                        ),
+                        key_names: vec![],
+                        val_names: vec![String::from("value")],
+                        key_schema: fixed_bytes!(),
+                        val_schema: fixed_bytes!(
+                            "0004010003000000000000000000000000000000000000000000000000000000"
+                        ),
+                        select_list: None,
+                    },
+                ],
             );
             assert_eq!(
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
@@ -422,6 +353,9 @@ pub struct Schema {
     pub val_names: Vec<String>,
     pub key_schema: FixedBytes<32>,
     pub val_schema: FixedBytes<32>,
+
+    #[serde(skip_serializing, skip_deserializing)]
+    pub select_list: Option<HashSet<String>>,
 }
 
 impl Schema {
@@ -447,14 +381,8 @@ impl Schema {
             val_schema: data.get_static32(2),
             key_names: SolArrayOf::<sol!(string)>::abi_decode(key_names, false)?,
             val_names: SolArrayOf::<sol!(string)>::abi_decode(val_names, false)?,
+            select_list: None,
         })
-    }
-
-    pub fn set_name(&mut self, name: &str) {
-        let mut name = name.as_bytes().to_vec();
-        name.truncate(16);
-        name.resize(16, 0);
-        self.table_id[16..].copy_from_slice(&name);
     }
 
     pub fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
@@ -465,6 +393,7 @@ impl Schema {
             key_schema: row.try_get("key_schema")?,
             val_names: row.try_get("val_names")?,
             val_schema: row.try_get("val_schema")?,
+            select_list: None,
         })
     }
 
@@ -558,18 +487,19 @@ impl Schema {
         String::from_utf8(b).unwrap()
     }
 
-    pub fn cte_sql(&self, columns: Vec<String>) -> Result<String, api::Error> {
+    pub fn cte_sql(&self) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
         res.push(format!("{} as (", self.table_name()));
         res.push("select".to_string());
-        res.push(
-            columns
-                .iter()
-                .map(|c| self.col_sql(c))
-                .collect::<Result<Vec<_>, _>>()?
-                .iter()
-                .join(","),
-        );
+        if let Some(sl) = &self.select_list {
+            res.push(
+                sl.iter()
+                    .map(|c| self.col_sql(c))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .iter()
+                    .join(","),
+            );
+        }
         res.push(format!(
             r#"from records where address = '\x{}' and table_id = '\x{}' and not expired and not deleted"#,
             hex::encode(self.address),
@@ -619,6 +549,7 @@ mod schema_tests {
             val_schema: fixed_bytes!(
                 "0004010003000000000000000000000000000000000000000000000000000000"
             ),
+            select_list: None,
         };
         assert_eq!(
             schema.col_sql("value").unwrap(),
