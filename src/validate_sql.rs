@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
 use eyre::Result;
+use itertools::Itertools;
 use sqlparser::{ast, dialect::PostgreSqlDialect, parser::Parser};
 
-use crate::{api, mud_schema};
+use crate::{
+    api,
+    mud_schema::{self, Schema},
+};
 
 const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
 
@@ -13,11 +17,11 @@ macro_rules! no {
     };
 }
 
-pub struct Validator<'a> {
-    schemas: HashMap<&'a str, &'a mud_schema::Schema>,
+pub struct Validator {
+    schemas: HashMap<String, mud_schema::Schema>,
 }
 
-impl<'a> Validator<'a> {
+impl Validator {
     pub fn validate(&self, query: &str) -> Result<(), api::Error> {
         let stmts = Parser::parse_sql(PG, query).map_err(|e| api::Error::User(e.to_string()))?;
         for stmt in stmts.iter() {
@@ -114,8 +118,8 @@ impl<'a> Validator<'a> {
 
     fn validate_expression(&self, expr: &ast::Expr) -> Result<(), api::Error> {
         match expr {
-            ast::Expr::Identifier(_) => Ok(()),
-            ast::Expr::CompoundIdentifier(_) => Ok(()),
+            ast::Expr::Identifier(id) => self.validate_column(id),
+            ast::Expr::CompoundIdentifier(ids) => self.validate_compound_column(ids),
             ast::Expr::IsFalse(_) => Ok(()),
             ast::Expr::IsNotFalse(_) => Ok(()),
             ast::Expr::IsTrue(_) => Ok(()),
@@ -129,6 +133,69 @@ impl<'a> Validator<'a> {
             ast::Expr::Subquery(subquery) => self.validate_query(subquery),
             ast::Expr::Tuple(exprs) => self.validate_expressions(exprs),
             _ => no!(expr),
+        }
+    }
+
+    fn validate_compound_column(&self, id: &Vec<ast::Ident>) -> Result<(), api::Error> {
+        let (table_name, col_name) = match id.len() {
+            3 => (id[0..2].iter().join("."), id[2].to_string()),
+            2 => (id[0].to_string(), id[1].to_string()),
+            _ => {
+                return Err(api::Error::User(format!(
+                    "compound column id must be of form: table.column got: {}",
+                    id.iter().join(" ")
+                )))
+            }
+        };
+        match self.schemas.get(&table_name) {
+            Some(schema) => {
+                if schema.val_names.iter().any(|v| *v == col_name) {
+                    Ok(())
+                } else {
+                    return Err(api::Error::User(format!(
+                        "column {} not defined in table {}",
+                        col_name, table_name,
+                    )));
+                }
+            }
+            None => {
+                return Err(api::Error::User(format!(
+                    "table {} not defined in query",
+                    table_name
+                )))
+            }
+        }
+    }
+
+    fn validate_column(&self, id: &ast::Ident) -> Result<(), api::Error> {
+        let matched_schemas: Vec<&mud_schema::Schema> = self
+            .schemas
+            .values()
+            .filter(|schema| {
+                schema
+                    .val_names
+                    .iter()
+                    .any(|val_name| *val_name == id.value)
+            })
+            .collect();
+        match matched_schemas.len() {
+            1 => Ok(()),
+            0 => Err(api::Error::User(format!(
+                "column {} not found in {}",
+                id.value,
+                self.schemas.values().map(|s| s.table_name()).join(","),
+            ))),
+            _ => {
+                return Err(api::Error::User(format!(
+                    "{} references more than one table: {}",
+                    id.value,
+                    matched_schemas
+                        .iter()
+                        .map(|s| s.table_name())
+                        .sorted()
+                        .join(","),
+                )))
+            }
         }
     }
 
@@ -159,7 +226,10 @@ impl<'a> Validator<'a> {
                     .collect::<Vec<String>>()
                     .contains(&name_parts[0].value.to_string())
                 {
-                    return no!(name_parts[0]);
+                    return Err(api::Error::User(format!(
+                        "no schema found for table: {}",
+                        name_parts[0],
+                    )));
                 }
                 return Ok(());
             }
@@ -172,66 +242,106 @@ impl<'a> Validator<'a> {
 mod tests {
     use super::*;
 
-    fn check_query(schema: &mud_schema::Schema, query: &str, want: Option<&str>) {
+    fn check_query(schemas: Vec<mud_schema::Schema>, query: &str, want: Option<&str>) {
         let v = Validator {
-            schemas: HashMap::from([("foo", schema)]),
+            schemas: schemas.into_iter().map(|s| (s.table_name(), s)).collect(),
         };
         match want {
             Some(msg) => match v.validate(query) {
                 Ok(_) => {
-                    panic!("wanted error got none")
+                    panic!("query: {}\n wanted error got none", query)
                 }
                 Err(api::Error::User(e)) => {
-                    assert_eq!(e.to_string(), msg)
+                    if e.to_string() != msg {
+                        panic!("query: {}\n unkown want: {:?} got: {:?}", query, msg, e);
+                    }
                 }
-                Err(e) => panic!("unkown error: {:?}", e),
+                Err(e) => panic!("query: {}\n unkown error: {:?}", query, e),
             },
             None => match v.validate(query) {
                 Ok(_) => {}
                 Err(e) => {
-                    panic!("wanted no error got: {:?}", e)
+                    panic!("query: {}\n wanted no error got: {:?}", query, e)
                 }
             },
         }
     }
 
-    fn test_schema(table_name: &str) -> mud_schema::Schema {
+    fn test_schema(table_name: &str, cols: Vec<&str>) -> mud_schema::Schema {
         let mut s = mud_schema::Schema::default();
         s.set_name(table_name);
+        s.val_names.extend(cols.into_iter().map(|s| s.to_string()));
         s
+    }
+
+    #[test]
+    fn test_supported_statements() {
+        vec![
+            (
+                vec![test_schema("foo", vec!["c"])],
+                "select c from foo",
+                None,
+            ),
+            (
+                vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
+                "select foo.c, bar.c from foo, bar",
+                None,
+            ),
+        ]
+        .into_iter()
+        .for_each(|c| check_query(c.0, c.1, c.2))
     }
 
     #[test]
     fn test_unsupported_statements() {
         vec![
             (
-                test_schema("foo"),
+                vec![test_schema("foo", vec![])],
                 "truncate foo",
                 Some("select queries only"),
             ),
             (
-                test_schema("foo"),
+                vec![test_schema("foo", vec![])],
                 "with foo as (select 1) select * from foo",
                 Some("with not supported"),
             ),
             (
-                test_schema("foo"),
+                vec![test_schema("foo", vec![])],
                 "select col from foo for update",
                 Some("for update not supported"),
             ),
             (
-                test_schema("foo"),
+                vec![test_schema("foo", vec![])],
                 "select foo",
                 Some("empty tables not supported"),
             ),
-            (test_schema("foo"), "select col from foo", None),
             (
-                test_schema("foo"),
-                "select col from bar",
-                Some("bar not supported"),
+                vec![test_schema("foo", vec!["c"])],
+                "select c from bar",
+                Some("no schema found for table: bar"),
+            ),
+            (
+                vec![test_schema("foo", vec!["c"])],
+                "select d from foo",
+                Some("column d not found in foo"),
+            ),
+            (
+                vec![test_schema("foo", vec!["c"])],
+                "select c from bar",
+                Some("no schema found for table: bar"),
+            ),
+            (
+                vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
+                "select c from foo, bar",
+                Some("c references more than one table: bar,foo"),
+            ),
+            (
+                vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
+                "select foo.c, bar.c, baz.d from foo, bar",
+                Some("table baz not defined in query"),
             ),
         ]
-        .iter()
-        .for_each(|c| check_query(&c.0, c.1, c.2))
+        .into_iter()
+        .for_each(|c| check_query(c.0, c.1, c.2))
     }
 }
