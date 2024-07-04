@@ -1,6 +1,7 @@
 use crate::{mud_encoding, mud_schema::Schema};
 
 use alloy::{
+    hex,
     primitives::{BlockHash, Bytes, FixedBytes, B256},
     providers::{Provider, ReqwestProvider},
     rpc::{
@@ -359,7 +360,7 @@ pub async fn index<T: EthApi>(
     Ok(())
 }
 
-#[tracing::instrument(fields(block_num, log_idx), skip_all)]
+#[tracing::instrument(fields(id, block_num, log_idx), skip_all)]
 async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), IndexError> {
     if let UpdateKind::Set {
         static_data,
@@ -367,11 +368,12 @@ async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), Index
         dynamic_data,
     } = &update.kind
     {
+        let key: B256 = B256::from_slice(&update.key);
         tracing::Span::current()
+            .record("id", hex::encode(key))
             .record("block_num", update.block_num)
             .record("log_idx", update.log_idx);
 
-        let key: B256 = B256::from_slice(&update.key);
         let schema = &Schema::from_data(
             update.address,
             key,

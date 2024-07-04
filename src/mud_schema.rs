@@ -379,8 +379,16 @@ impl Schema {
             table_id: table_id,
             key_schema: data.get_static32(1),
             val_schema: data.get_static32(2),
-            key_names: SolArrayOf::<sol!(string)>::abi_decode(key_names, false)?,
-            val_names: SolArrayOf::<sol!(string)>::abi_decode(val_names, false)?,
+            key_names: SolArrayOf::<sol!(string)>::abi_decode(key_names, false)
+                .inspect_err(|e| {
+                    tracing::error!("decoding key names: {} {}", e, hex::encode(key_names))
+                })
+                .unwrap_or_default(),
+            val_names: SolArrayOf::<sol!(string)>::abi_decode(val_names, false)
+                .inspect_err(|e| {
+                    tracing::error!("decoding val names: {} {}", e, hex::encode(val_names))
+                })
+                .unwrap_or_default(),
             select_list: None,
         })
     }
