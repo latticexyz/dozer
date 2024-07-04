@@ -359,7 +359,7 @@ pub async fn index<T: EthApi>(
     Ok(())
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(fields(block_num, log_idx), skip_all)]
 async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), IndexError> {
     if let UpdateKind::Set {
         static_data,
@@ -367,6 +367,10 @@ async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), Index
         dynamic_data,
     } = &update.kind
     {
+        tracing::Span::current()
+            .record("block_num", update.block_num)
+            .record("log_idx", update.log_idx);
+
         let key: B256 = B256::from_slice(&update.key);
         let schema = &Schema::from_data(
             update.address,
