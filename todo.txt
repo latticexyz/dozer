@@ -1,3 +1,12 @@
+- narrow sql query interface
+- cli for sql queries
+
+- add point-in-time records query
+- rpc client timeouts
+- http rate limiter
+- integration test that hits real endpoints with stable data
+
+x api/cli for exploring tables / schemas
 x unit test splicing data
 x review & document data model / expiry
 x http error handler
@@ -20,8 +29,3 @@ x pg tls connection
 x add api specs to readme
 x advisory lock for ensuring 1 indexer
 x control reset start point from flags
-
-- add point-in-time records query
-- rpc client timeouts
-- http rate limiter
-- integration test that hits real endpoints with stable data
