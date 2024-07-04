@@ -5,6 +5,7 @@ mod api_tables;
 mod indexer;
 mod mud_encoding;
 mod mud_schema;
+mod validate_sql;
 
 use alloy::providers::ProviderBuilder;
 use axum::{
