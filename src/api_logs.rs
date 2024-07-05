@@ -143,13 +143,15 @@ impl LogsQuery {
             query.params.push(Box::new(input.address))
         }
         if let Some(mut filters) = input.filters {
-            filters.push(LogsRequestFilter {
-                table_id: Some(fixed_bytes!(
-                    "746273746f72650000000000000000005461626c657300000000000000000000"
-                )),
-                key0: None,
-                key1: None,
-            });
+            if filters.len() > 0 {
+                filters.push(LogsRequestFilter {
+                    table_id: Some(fixed_bytes!(
+                        "746273746f72650000000000000000005461626c657300000000000000000000"
+                    )),
+                    key0: None,
+                    key1: None,
+                });
+            }
             filters.iter().for_each(|f| {
                 if f.table_id.is_some() {
                     query.add_filter_field("table_id", Box::new(f.table_id));
@@ -182,6 +184,14 @@ impl LogsQuery {
         self.and_predicates.clear();
     }
 
+    fn filters_sql(&self) -> String {
+        if self.or_predicates.len() > 0 {
+            format!("and ({})", self.or_predicates.join(" or "))
+        } else {
+            "".to_string()
+        }
+    }
+
     fn to_sql(&self) -> String {
         format!(
             "
@@ -197,17 +207,54 @@ impl LogsQuery {
             from records
             where not expired
             and not deleted
-            and address = $1
-            and ({})
+            and address = $1 {}
             ",
-            self.or_predicates.join(" or ")
+            self.filters_sql()
         )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+
     use super::*;
+
+    fn fmt_sql(sql: &str) -> Result<String> {
+        const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
+        let ast = Parser::parse_sql(PG, sql)?;
+        Ok(ast[0].to_string())
+    }
+
+    #[test]
+    fn test_logs_query_empty_filters() {
+        let query = LogsQuery::new(LogsRequestInput {
+            _chain_id: Some(690),
+            address: Some(FixedBytes::<20>::with_last_byte(1)),
+            filters: Some(vec![]),
+        });
+        assert_eq!(
+            fmt_sql(&query.to_sql()).expect("invalid sql"),
+            fmt_sql(
+                "
+                select
+                    block_num,
+                    log_idx,
+                    address,
+                    table_id,
+                    key,
+                    static_data,
+                    encoded_lengths,
+                    dynamic_data
+                from records
+                where not expired
+                and not deleted
+                and address = $1
+            "
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn test_logs_query() {
