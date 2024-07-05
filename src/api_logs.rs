@@ -268,12 +268,16 @@ mod tests {
             }]),
         });
         assert_eq!(query.params.len(), 5);
-        assert_eq!(
-            query.or_predicates,
-            vec![
-                "(table_id = $2 and sdec(key, 0, 32) = $3 and sdec(key, 32, 32) = $4)",
-                "(table_id = $5)"
-            ]
-        );
+        assert_eq!(fmt_sql(&query.to_sql()).unwrap(), fmt_sql("
+            SELECT block_num, log_idx, address, table_id, key, static_data, encoded_lengths, dynamic_data
+            FROM records
+            WHERE NOT expired
+            AND NOT deleted
+            AND address = $1
+            AND (
+                (table_id = $2 AND sdec(key, 0, 32) = $3 AND sdec(key, 32, 32) = $4)
+                OR
+                (table_id = $5)
+            )").unwrap());
     }
 }
