@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::{api, mud_schema};
 
 use alloy::{hex, primitives::Address};
@@ -50,12 +48,19 @@ pub async fn handle(
         .await
         .wrap_err("querying records table")?;
 
-    let mut col_names = HashSet::new();
     let mut result: Vec<Vec<Value>> = Vec::new();
+    if let Some(first) = rows.first() {
+        result.push(
+            first
+                .columns()
+                .iter()
+                .map(|c| Value::String(c.name().to_string()))
+                .collect(),
+        );
+    }
     for row in rows {
         let mut json_row: Vec<Value> = Vec::new();
         for (idx, column) in row.columns().iter().enumerate() {
-            col_names.insert(Value::String(column.name().to_string()));
             let value = match *column.type_() {
                 Type::NUMERIC => {
                     let n: U256 = row.get(idx);
@@ -79,7 +84,6 @@ pub async fn handle(
         }
         result.push(json_row)
     }
-    result.insert(0, col_names.into_iter().collect_vec());
     Ok(Json(result))
 }
 
