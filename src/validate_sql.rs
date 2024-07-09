@@ -169,7 +169,7 @@ impl Validator {
         };
         match self.schemas.get_mut(&table_name) {
             Some(schema) => {
-                if schema.val_names.iter().any(|v| *v == col_name) {
+                if schema.has_column(&col_name) {
                     schema
                         .select_list
                         .as_mut()
@@ -195,12 +195,7 @@ impl Validator {
         let matched_schemas: Vec<&mud_schema::Schema> = self
             .schemas
             .values()
-            .filter(|schema| {
-                schema
-                    .val_names
-                    .iter()
-                    .any(|val_name| *val_name == id.value)
-            })
+            .filter(|s| s.has_column(&id.value))
             .collect();
         match matched_schemas.len() {
             1 => {
