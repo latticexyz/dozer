@@ -36,12 +36,12 @@ impl<'a> Data<'a> {
         if data_length == 0 {
             return None;
         }
-        let start = self
-            .encoded_lengths
+        let start = self.encoded_lengths[..25]
             .chunks(5)
-            .take(field + 1)
+            .rev()
+            .take(field)
             .fold(0, |length, bytes| length + dec(bytes));
-        return self.dynamic_data.get(start..data_length);
+        return self.dynamic_data.get(start..start + data_length);
     }
 
     pub fn get_static32(&self, field: usize) -> B256 {
@@ -54,7 +54,7 @@ impl<'a> Data<'a> {
 #[cfg(test)]
 mod dynamic_data_test {
     use super::Data;
-    use alloy::primitives::fixed_bytes;
+    use alloy::primitives::{fixed_bytes, FixedBytes};
 
     #[test]
     fn test_new_error() {
@@ -84,19 +84,27 @@ mod dynamic_data_test {
     #[test]
     fn test_new_not_empty() {
         let sd = &[];
-        let el = fixed_bytes!("0000000000000000000000000000000000000000000000002000000000000020");
-        let dd = &[1u8; 32];
-        let dd = Data::new(sd, el, dd);
+        let mut el = FixedBytes::<32>::ZERO;
+        el[19] = 127;
+        el[24] = 128;
+        el[31] = 255;
+
+        let mut dd = [0u8; 255];
+        dd[..128].fill(0x01);
+        dd[128..].fill(0x02);
+
+        let dd = Data::new(sd, el, &dd);
         assert!(dd.is_ok());
 
         let dd = dd.unwrap();
         assert!(dd.get_dynamic(0).is_some());
-        assert!(dd.get_dynamic(1).is_none());
+        assert!(dd.get_dynamic(1).is_some());
         assert!(dd.get_dynamic(2).is_none());
         assert!(dd.get_dynamic(4).is_none());
         assert!(dd.get_dynamic(4).is_none());
 
-        assert_eq!(dd.get_dynamic(0).unwrap(), &[1u8; 32])
+        assert_eq!(dd.get_dynamic(0).unwrap(), &[1u8; 128]);
+        assert_eq!(dd.get_dynamic(1).unwrap(), &[2u8; 127]);
     }
 }
 
