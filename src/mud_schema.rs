@@ -143,6 +143,8 @@ pub mod query {
 }
 
 mod field {
+    use crate::api;
+
     #[derive(Debug, PartialEq)]
     pub enum Desc {
         Address,
@@ -233,11 +235,34 @@ mod field {
             }
         }
 
-        pub fn to_sql(&self, pos: usize, name: &str) -> String {
+        pub fn key_sql(&self, pos: usize, name: &str) -> Result<String, api::Error> {
+            match self {
+                Kind::Static(t) => match t {
+                    Static::Num(_, _) => {
+                        Ok(format!("b2n(sdec(key, {}, 32)) as {}", 32 * pos, name))
+                    }
+                    Static::Bytea(_, Desc::Address) => Ok(format!(
+                        "substring(sdec(key, {}, 32) from 13 for 20) as {}",
+                        32 * pos,
+                        name
+                    )),
+                    Static::Bytea(_, _) => Ok(format!("sdec(key, {}, 32) as {}", 32 * pos, name)),
+                },
+                _ => Err(api::Error::User("key must be static".to_string())),
+            }
+        }
+
+        pub fn val_sql(&self, pos: usize, name: &str) -> String {
             match self {
                 Kind::Static(t) => match t {
                     Static::Num(size, _) => {
                         format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
+                    }
+                    Static::Bytea(size, Desc::Address) => {
+                        format!(
+                            "substring(sdec(static_data, {}, {}) from 13 for 20) as {}",
+                            pos, size, name
+                        )
                     }
                     Static::Bytea(size, _) => {
                         format!("sdec(static_data, {}, {}) as {}", pos, size, name)
@@ -312,27 +337,27 @@ mod field {
         #[test]
         fn test_to_sql() {
             assert_eq!(
-                Kind::Static(Static::Num(32, Desc::Uint)).to_sql(1, "foo"),
+                Kind::Static(Static::Num(32, Desc::Uint)).val_sql(1, "foo"),
                 "b2n(sdec(static_data, 1, 32)) as foo"
             );
             assert_eq!(
-                Kind::Static(Static::Bytea(32, Desc::Bytes)).to_sql(1, "foo"),
+                Kind::Static(Static::Bytea(32, Desc::Bytes)).val_sql(1, "foo"),
                 "sdec(static_data, 1, 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))).to_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))).val_sql(0, "foo"),
                 "b2ab(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))).to_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))).val_sql(0, "foo"),
                 "b2an(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Bytea).to_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Bytea).val_sql(0, "foo"),
                 "ddec(encoded_lengths, dynamic_data, 0) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Text).to_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Text).val_sql(0, "foo"),
                 r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, 0), '\x00'), 'UTF8') as foo"#
             );
         }
@@ -480,6 +505,11 @@ impl Schema {
         lines.join("\n")
     }
 
+    pub fn has_column(&self, col_name: &str) -> bool {
+        self.key_names.iter().any(|name| name == col_name)
+            || self.val_names.iter().any(|name| name == col_name)
+    }
+
     pub fn namespace(&self) -> String {
         let b: Vec<u8> = self.table_id[2..15]
             .iter()
@@ -522,7 +552,8 @@ impl Schema {
 
     pub fn col_sql(&self, name: &str) -> Result<String, api::Error> {
         if let Some(pos) = self.key_names.iter().position(|n| n == name) {
-            return Ok(format!("sdec(key, {}, 32) as {}", pos * 32, name));
+            let schema_type = field::Kind::from_schema_type(self.key_schema[4 + pos]).unwrap();
+            return schema_type.key_sql(pos, name);
         }
         let mut pos = self
             .val_names
@@ -540,7 +571,7 @@ impl Schema {
                 .map(|b| field::Kind::from_schema_type(*b).unwrap().size().unwrap())
                 .sum()
         }
-        Ok(schema_type.to_sql(pos, name))
+        Ok(schema_type.val_sql(pos, name))
     }
 }
 
