@@ -5,6 +5,7 @@ mod api_tables;
 mod indexer;
 mod mud_encoding;
 mod mud_schema;
+mod reindex;
 mod validate_sql;
 
 use alloy::providers::ProviderBuilder;
@@ -22,7 +23,7 @@ use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
 use metrics_util::layers::Layer as MetricsUtilLayer;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use std::{future::ready, str::FromStr, time::Duration};
+use std::{future::ready, process::exit, str::FromStr, time::Duration};
 use tokio::{self};
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing::level_filters::LevelFilter;
@@ -47,7 +48,7 @@ struct ServerArgs {
     eth_url: Url,
 
     #[arg(long, env = "RO_PASSWORD")]
-    ro_password: String,
+    ro_password: Option<String>,
 
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_index: bool,
@@ -64,9 +65,10 @@ struct ServerArgs {
 
 #[derive(Subcommand)]
 enum Commands {
+    Query(api_sql::cli::Request),
+    Reindex(ServerArgs),
     Server(ServerArgs),
     Table(api_tables::cli::Request),
-    Query(api_sql::cli::Request),
 }
 
 #[tokio::main]
@@ -90,6 +92,7 @@ async fn main() -> eyre::Result<()> {
         Some(Commands::Table(args)) => api_tables::cli::request(&http_client, args).await,
         Some(Commands::Query(args)) => api_sql::cli::request(&http_client, args).await,
         Some(Commands::Server(args)) => server(args).await,
+        Some(Commands::Reindex(args)) => reindex(args).await,
         None => server(ServerArgs::parse()).await,
     }
 }
@@ -114,6 +117,34 @@ fn api_ro_pg(cstr: &str, ro_password: &str) -> Pool {
         .expect("unable to build new ro pool")
 }
 
+async fn reindex(args: ServerArgs) -> eyre::Result<()> {
+    let mut builder = SslConnector::builder(SslMethod::tls()).expect("tls builder");
+    builder.set_verify(SslVerifyMode::NONE);
+    let connector = MakeTlsConnector::new(builder.build());
+    let (mut w_pg, w_pg_conn) = tokio_postgres::connect(&args.pg_url, connector).await?;
+    tokio::spawn(async move {
+        if let Err(e) = w_pg_conn.await {
+            panic!("database writer error: {}", e)
+        }
+    });
+
+    w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
+    loop {
+        match reindex::tables(&mut w_pg).await {
+            Err(e) => {
+                panic!("reindexing: {:?}", e);
+            }
+            Ok(n) if n == 0 => {
+                println!("done");
+                exit(0)
+            }
+            Ok(n) => {
+                tracing::info!("re-indexed {} tables", n)
+            }
+        }
+    }
+}
+
 async fn server(args: ServerArgs) -> eyre::Result<()> {
     let mut builder = SslConnector::builder(SslMethod::tls()).expect("tls builder");
     builder.set_verify(SslVerifyMode::NONE);
@@ -132,7 +163,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
     }
 
     let config = api::Config {
-        pool: api_ro_pg(&args.pg_url, &args.ro_password),
+        pool: api_ro_pg(&args.pg_url, &args.ro_password.unwrap_or_default()),
     };
 
     let prom_record = PrometheusBuilder::new()
