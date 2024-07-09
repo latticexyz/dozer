@@ -25,9 +25,8 @@ use postgres_openssl::MakeTlsConnector;
 use std::{future::ready, str::FromStr, time::Duration};
 use tokio::{self};
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
-use tracing_subscriber::{
-    layer::SubscriberExt, Layer as TracingSubscriberLayer, Registry as TracingSubscriberRegistry,
-};
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use url::Url;
 
 static SCHEMA: &'static str = include_str!("./schema.sql");
@@ -71,28 +70,17 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    let no_uri = tracing_subscriber::fmt::format::debug_fn(|writer, field, value| {
-        if field.name() == "uri" {
-            write!(writer, "uri: [see-error-log]")
-        } else {
-            write!(writer, "{}: {:?}", field, value)
-        }
-    });
-    let file_appender = tracing_appender::rolling::hourly("/tmp", "dozer-error.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    let error_data_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_filter(tracing::level_filters::LevelFilter::ERROR);
-    let info_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout)
-        .fmt_fields(no_uri)
+    let fmt_layer = fmt::layer()
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .with_filter(tracing::level_filters::LevelFilter::INFO);
-    let subscriber = TracingSubscriberRegistry::default()
-        .with(error_data_layer)
-        .with(info_layer)
-        .with(MetricsLayer::new());
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+        .compact();
+    let filter_layer = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+    tracing_subscriber::registry()
+        .with(MetricsLayer::new())
+        .with(fmt_layer)
+        .with(filter_layer)
+        .init();
 
     let args = Dozer::parse();
     let http_client = reqwest::Client::new();
