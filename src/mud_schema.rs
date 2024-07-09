@@ -4,7 +4,7 @@ use crate::api;
 
 use alloy::{
     hex,
-    primitives::{b256, FixedBytes, B256},
+    primitives::{b256, Address, FixedBytes, B256},
     sol,
     sol_types::SolType,
 };
@@ -19,7 +19,7 @@ use crate::mud_encoding;
 pub mod query {
     use crate::{api, validate_sql};
 
-    use alloy::primitives::FixedBytes;
+    use alloy::primitives::Address;
     use eyre::Result;
     use itertools::Itertools;
     use sqlparser::{ast::visit_relations, dialect::PostgreSqlDialect, parser::Parser};
@@ -31,7 +31,7 @@ pub mod query {
 
     pub async fn enhance(
         pg: &tokio_postgres::Client,
-        address: FixedBytes<20>,
+        address: Address,
         user_query: &str,
     ) -> Result<String, api::Error> {
         let parsed_query =
@@ -45,7 +45,7 @@ pub mod query {
 
     async fn load_schemas(
         pg: &tokio_postgres::Client,
-        address: FixedBytes<20>,
+        address: Address,
         query: &Vec<sqlparser::ast::Statement>,
     ) -> Result<Vec<Schema>, api::Error> {
         let mut table_names = HashSet::new();
@@ -175,8 +175,11 @@ mod field {
     impl Static {
         fn description(&self) -> String {
             match self {
-                Static::Bytea(size, d) => format!("{}{}", d.to_string(), size),
-                Static::Num(size, d) => format!("{}{}", d.to_string(), size),
+                Static::Bytea(_, Desc::Address) => "address".to_string(),
+                Static::Bytea(size, d) => {
+                    format!("{}{}", d.to_string(), size)
+                }
+                Static::Num(size, d) => format!("{}{}", d.to_string(), 8 * (*size as u64).min(32)),
             }
         }
     }
@@ -408,7 +411,7 @@ impl Schema {
     #[tracing::instrument]
     pub async fn from_pg(
         pg: &Client,
-        address: FixedBytes<20>,
+        address: Address,
         tables: Vec<String>,
     ) -> Result<Vec<Self>, tokio_postgres::Error> {
         pg.query(
@@ -418,7 +421,7 @@ impl Schema {
                 where address = $1
                 and name = ANY($2)
             "#,
-            &[&address, &tables],
+            &[&address.0, &tables],
         )
         .await?
         .iter()
