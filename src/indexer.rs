@@ -389,16 +389,16 @@ async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), Index
 type RecordId = (FixedBytes<20>, FixedBytes<32>, Vec<u8>);
 
 #[derive(Debug)]
-struct Record {
-    block_num: U64,
-    log_idx: U64,
-    address: FixedBytes<20>,
-    table_id: FixedBytes<32>,
-    key: Vec<u8>,
-    static_data: Vec<u8>,
-    encoded_lengths: FixedBytes<32>,
-    dynamic_data: Vec<u8>,
-    deleted: bool,
+pub struct Record {
+    pub block_num: U64,
+    pub log_idx: U64,
+    pub address: FixedBytes<20>,
+    pub table_id: FixedBytes<32>,
+    pub key: Vec<u8>,
+    pub static_data: Vec<u8>,
+    pub encoded_lengths: FixedBytes<32>,
+    pub dynamic_data: Vec<u8>,
+    pub deleted: bool,
 }
 
 impl Record {
@@ -420,7 +420,7 @@ impl Record {
         }
     }
 
-    fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
+    pub fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
         Ok(Record {
             block_num: row.try_get("block_num")?,
             log_idx: row.try_get("log_idx")?,
