@@ -66,6 +66,7 @@ struct ServerArgs {
 enum Commands {
     Server(ServerArgs),
     Table(api_tables::cli::Request),
+    Query(api_sql::cli::Request),
 }
 
 #[tokio::main]
@@ -87,6 +88,7 @@ async fn main() -> eyre::Result<()> {
 
     match args.command {
         Some(Commands::Table(args)) => api_tables::cli::request(&http_client, args).await,
+        Some(Commands::Query(args)) => api_sql::cli::request(&http_client, args).await,
         Some(Commands::Server(args)) => server(args).await,
         None => server(ServerArgs::parse()).await,
     }

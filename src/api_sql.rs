@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use crate::{api, mud_schema};
 
-use alloy::{hex, primitives::FixedBytes};
+use alloy::{hex, primitives::Address};
 use axum::{extract::State, Json};
 use eyre::{Context, Result};
 use itertools::Itertools;
@@ -10,8 +12,8 @@ use serde_json::Value;
 use tokio_postgres::types::{ToSql, Type};
 
 #[derive(Deserialize, Serialize)]
-pub struct GetRecsReq {
-    pub address: FixedBytes<20>,
+pub struct Request {
+    pub address: Address,
     pub query: String,
     pub values: Vec<Value>,
 }
@@ -19,8 +21,8 @@ pub struct GetRecsReq {
 #[tracing::instrument(skip_all)]
 pub async fn handle(
     State(state): State<api::Config>,
-    api::Json(req): api::Json<GetRecsReq>,
-) -> Result<Json<Vec<Value>>, api::Error> {
+    api::Json(req): api::Json<Request>,
+) -> Result<Json<Vec<Vec<Value>>>, api::Error> {
     let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
     for val in req.values {
         match val {
@@ -33,10 +35,13 @@ pub async fn handle(
             }
         }
     }
+
     let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
+    let query = mud_schema::query::enhance(&pg, req.address, &req.query).await?;
+
     let rows = pg
         .query(
-            &mud_schema::query::enhance(&pg, req.address, &req.query).await?,
+            &dbg!(query),
             &vals
                 .iter()
                 .map(|x| x.as_ref() as &(dyn ToSql + Sync))
@@ -45,11 +50,12 @@ pub async fn handle(
         .await
         .wrap_err("querying records table")?;
 
-    let mut result: Vec<Value> = Vec::new();
+    let mut col_names = HashSet::new();
+    let mut result: Vec<Vec<Value>> = Vec::new();
     for row in rows {
-        let mut row_json = serde_json::Map::new();
+        let mut json_row: Vec<Value> = Vec::new();
         for (idx, column) in row.columns().iter().enumerate() {
-            let key = column.name().to_string();
+            col_names.insert(Value::String(column.name().to_string()));
             let value = match *column.type_() {
                 Type::NUMERIC => {
                     let n: U256 = row.get(idx);
@@ -69,9 +75,59 @@ pub async fn handle(
                 }
                 _ => Value::Null,
             };
-            row_json.insert(key, value);
+            json_row.push(value);
         }
-        result.push(Value::Object(row_json))
+        result.push(json_row)
     }
+    result.insert(0, col_names.into_iter().collect_vec());
     Ok(Json(result))
+}
+
+pub mod cli {
+    use crate::api::client_post;
+    use alloy::primitives::Address;
+    use clap::Args;
+    use eyre::Result;
+    use itertools::Itertools;
+    use reqwest::Client;
+    use serde_json::Value;
+    use std::io::Write;
+    use url::Url;
+
+    #[derive(Args, Debug)]
+    pub struct Request {
+        #[clap(short, long, global = true, default_value = "http://0.0.0.0:8000")]
+        dozer_url: Url,
+
+        pub query: String,
+
+        #[arg(short, long, env = "DOZER_ADDRESS")]
+        pub address: Address,
+    }
+
+    pub async fn request(http_client: &Client, args: Request) -> Result<()> {
+        let req_body = super::Request {
+            address: args.address,
+            query: args.query,
+            values: vec![],
+        };
+
+        let mut req_path = args.dozer_url.clone();
+        req_path.set_path("/q");
+        let res = client_post::<Vec<Vec<Value>>, _>(&http_client, req_path, &req_body).await?;
+
+        let mut tw = tabwriter::TabWriter::new(std::io::stdout());
+        let out = res
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|r| r.as_str().unwrap_or_default().to_string())
+                    .collect::<Vec<String>>()
+                    .join("\t")
+            })
+            .join("\n");
+        writeln!(tw, "{}", out).expect("unable to write to stdout");
+        tw.flush().expect("unable to write to stdout");
+        Ok(())
+    }
 }
