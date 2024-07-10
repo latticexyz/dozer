@@ -92,7 +92,13 @@ pub mod cli {
 
     #[derive(Args, Debug)]
     pub struct Request {
-        #[clap(short, long, global = true, default_value = "http://0.0.0.0:8000")]
+        #[clap(
+            short,
+            long,
+            global = true,
+            env = "DOZER_URL",
+            default_value = "http://0.0.0.0:8000"
+        )]
         dozer_url: Url,
 
         pub resource_id: String,
