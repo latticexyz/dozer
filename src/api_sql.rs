@@ -62,6 +62,10 @@ pub async fn handle(
         let mut json_row: Vec<Value> = Vec::new();
         for (idx, column) in row.columns().iter().enumerate() {
             let value = match *column.type_() {
+                Type::BOOL => {
+                    let b: bool = row.get(idx);
+                    Value::Bool(b)
+                }
                 Type::NUMERIC => {
                     let n: U256 = row.get(idx);
                     Value::String(n.to_string())
