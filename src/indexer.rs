@@ -63,6 +63,7 @@ sol! {
 pub enum IndexError {
     Retry(eyre::Report),
     Fatal(eyre::Report),
+    NothingNew(u64),
 }
 
 impl From<eyre::Report> for IndexError {
@@ -212,11 +213,7 @@ async fn next_to_index<F: EthApi>(
             .record("local", local_num);
 
         if local_num >= remote_num {
-            return Err(IndexError::Retry(eyre!(
-                "nothing new remote={} local={}",
-                remote_num,
-                local_num,
-            )));
+            return Err(IndexError::NothingNew(local_num));
         }
         let delta = cmp::min(remote_num - local_num, batch_size);
         let (from, to) = (
