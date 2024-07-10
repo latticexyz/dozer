@@ -228,6 +228,10 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
         loop {
             match indexer::index(&eth_client, &mut w_pg, batch_size).await {
                 Ok(_) => batch_size = args.batch_size,
+                Err(indexer::IndexError::NothingNew(n)) => {
+                    tracing::info!("nothing new. latest: {}", n);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
                 Err(indexer::IndexError::Fatal(e)) => {
                     tracing::error!(%e, "An error occurred: {:?}", e);
                     std::process::exit(1);
