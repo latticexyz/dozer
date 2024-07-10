@@ -72,7 +72,7 @@ pub async fn handle(
                 }
                 Type::BYTEA => {
                     let b: &[u8] = row.get(idx);
-                    Value::String(hex::encode(b))
+                    Value::String(hex::encode_prefixed(b))
                 }
                 Type::TEXT => {
                     let s: String = row.get(idx);
