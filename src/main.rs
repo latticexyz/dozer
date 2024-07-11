@@ -25,7 +25,9 @@ use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
 use std::{future::ready, process::exit, str::FromStr, time::Duration};
 use tokio::{self};
-use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    compression::CompressionLayer, cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer,
+};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use url::Url;
@@ -199,6 +201,10 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
         .layer(TimeoutLayer::new(Duration::from_secs(10)))
         .layer(CompressionLayer::new());
 
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any);
+
     let (app, listener) = (
         Router::new()
             .route("/", get(|| async { "hello\n" }))
@@ -207,6 +213,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             .route("/tables", post(api_tables::handle))
             .route("/api/logs", get(api_logs::handle))
             .layer(service)
+            .layer(cors)
             .with_state(config.clone()),
         tokio::net::TcpListener::bind(args.listen)
             .await
