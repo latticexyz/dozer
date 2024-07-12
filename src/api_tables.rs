@@ -126,8 +126,9 @@ pub mod cli {
         let res =
             client_post::<Vec<mud_schema::Schema>, _>(&http_client, req_path, &req_body).await?;
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
-        res.iter()
-            .for_each(|s| writeln!(tw, "{}", s.description()).expect("unable to write to stdout"));
+        res.iter().for_each(|s| {
+            writeln!(tw, "{}\r", s.description()).expect("unable to write to stdout")
+        });
         Ok(())
     }
 }
