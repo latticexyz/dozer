@@ -1,0 +1,8 @@
+Query decoded MUD schemas based on name or table id
+
+When querying by name, the '%' character can be used as awild card.
+
+    dozer table '%'
+    dozer table '%oo'
+    dozer table 'fo%'
+    dozer table '%o%'

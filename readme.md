@@ -182,3 +182,26 @@ log and in this case we do not carry forward the previous static_data,
 dynamic_lengths, or dynamic_data.
 
 Many logs for a particular table_id/key may exist within a block.
+
+## Installation
+
+Install system dependencies for Linux
+```
+sudo apt install -y build-essential pkg-config libssl-dev
+```
+
+Install Rust toolchain for Mac/Linux.
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Download and build dozer
+```
+git clone git@github.com:latticexyz/dozer.git
+cd dozer
+cargo build
+```
+
+## CLI
+
+For an up-to-date menu of CLI options please install and use the `-h` flag.
