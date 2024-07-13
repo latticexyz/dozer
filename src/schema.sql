@@ -75,7 +75,7 @@ begin
     for i in 0..(nparts- 1) loop
         parts := array_append(parts, substring(data, (i * n) + 1, n));
     end loop;
-    return result;
+    return parts;
 end;
 $$ language plpgsql;
 
