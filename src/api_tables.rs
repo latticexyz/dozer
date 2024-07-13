@@ -94,17 +94,10 @@ pub mod cli {
 
     #[derive(Args, Debug)]
     pub struct Request {
-        #[clap(
-            short,
-            long,
-            global = true,
-            env = "DOZER_URL",
-            default_value = "https://dozer.mud.redstonechain.com"
-        )]
-        dozer_url: Url,
+        #[arg(from_global)]
+        url: Url,
 
         pub resource_id: String,
-
         #[arg(short, long, env = "DOZER_ADDRESS")]
         pub address: Option<Address>,
     }
@@ -122,7 +115,7 @@ pub mod cli {
             }
         };
 
-        let mut req_path = targs.dozer_url.clone();
+        let mut req_path = targs.url.clone();
         req_path.set_path("/tables");
 
         let res =

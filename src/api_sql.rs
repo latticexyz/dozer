@@ -106,18 +106,12 @@ pub mod cli {
 
     #[derive(Args, Debug)]
     pub struct Request {
-        #[clap(
-            short,
-            long,
-            global = true,
-            env = "DOZER_URL",
-            default_value = "https://dozer.mud.redstonechain.com"
-        )]
-        dozer_url: Url,
+        #[arg(from_global)]
+        url: Url,
 
         pub query: String,
 
-        #[arg(short, long, env = "DOZER_ADDRESS")]
+        #[arg(short, long, help = "world address", env = "DOZER_ADDRESS")]
         pub address: Address,
     }
 
@@ -128,7 +122,7 @@ pub mod cli {
             values: vec![],
         };
 
-        let mut req_path = args.dozer_url.clone();
+        let mut req_path = args.url.clone();
         req_path.set_path("/q");
         let res = client_post::<Vec<Vec<Value>>, _>(&http_client, req_path, &req_body).await?;
 

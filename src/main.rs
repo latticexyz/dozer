@@ -37,6 +37,14 @@ static SCHEMA: &'static str = include_str!("./schema.sql");
 #[derive(Parser)]
 #[command(name = "dozer", about = "An indexer for MUD", version = "0.1")]
 struct Dozer {
+    #[clap(
+        long = "url",
+        global = true,
+        env = "DOZER_URL",
+        default_value = "https://dozer.mud.redstonechain.com"
+    )]
+    url: Url,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
