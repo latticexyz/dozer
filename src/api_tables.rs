@@ -90,6 +90,8 @@ pub mod cli {
 
     use crate::{api::client_post, mud_schema};
 
+    pub const HELP: &'static str = include_str!("./cli-help/table.txt");
+
     #[derive(Args, Debug)]
     pub struct Request {
         #[clap(
@@ -97,7 +99,7 @@ pub mod cli {
             long,
             global = true,
             env = "DOZER_URL",
-            default_value = "http://0.0.0.0:8000"
+            default_value = "https://dozer.mud.redstonechain.com"
         )]
         dozer_url: Url,
 

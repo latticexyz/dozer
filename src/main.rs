@@ -67,9 +67,11 @@ struct ServerArgs {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(name = "query", about = "Query MUD Records", long_about = Some(api_sql::cli::HELP))]
     Query(api_sql::cli::Request),
     Reindex(ServerArgs),
     Server(ServerArgs),
+    #[command(name = "table", about = "Query MUD Tables", long_about = Some(api_tables::cli::HELP))]
     Table(api_tables::cli::Request),
 }
 

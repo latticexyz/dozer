@@ -102,6 +102,8 @@ pub mod cli {
     use std::io::Write;
     use url::Url;
 
+    pub const HELP: &'static str = include_str!("./cli-help/query.txt");
+
     #[derive(Args, Debug)]
     pub struct Request {
         #[clap(
@@ -109,7 +111,7 @@ pub mod cli {
             long,
             global = true,
             env = "DOZER_URL",
-            default_value = "http://0.0.0.0:8000"
+            default_value = "https://dozer.mud.redstonechain.com"
         )]
         dozer_url: Url,
 
