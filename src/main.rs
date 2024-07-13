@@ -63,22 +63,25 @@ struct ServerArgs {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_index: bool,
 
-    #[clap(short, long)]
+    #[clap(long)]
     index_start: Option<u64>,
 
-    #[clap(short, long, default_value = "1000")]
+    #[clap(long, default_value = "1000")]
     batch_size: u64,
 
-    #[clap(short, long, default_value = "0.0.0.0:8000")]
+    #[clap(long, default_value = "0.0.0.0:8000")]
     listen: String,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(name = "re-index", about = "Re-index MUD schemas using records table")]
+    Reindex(ServerArgs),
+    #[command(name = "server", about = "Start indexing and serving API requests")]
+    Server(ServerArgs),
+
     #[command(name = "query", about = "Query MUD Records", long_about = Some(api_sql::cli::HELP))]
     Query(api_sql::cli::Request),
-    Reindex(ServerArgs),
-    Server(ServerArgs),
     #[command(name = "table", about = "Query MUD Tables", long_about = Some(api_tables::cli::HELP))]
     Table(api_tables::cli::Request),
 }
