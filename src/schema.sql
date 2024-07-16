@@ -10,7 +10,7 @@ begin
     end if;
     return substring(data from i+1 for n);  -- substring is 1-index
 end;
-$$ language plpgsql strict immutable;
+$$ language plpgsql strict immutable parallel safe cost 1;
 
 create table if not exists blocks (num numeric primary key, hash bytea, parent bytea);
 
