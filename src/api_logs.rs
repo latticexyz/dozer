@@ -22,7 +22,7 @@ pub struct LogArg {
     #[serde(rename = "staticData")]
     static_data: Bytes,
     #[serde(rename = "encodedLengths")]
-    encoded_lengths: FixedBytes<32>,
+    encoded_lengths: Bytes,
     #[serde(rename = "dynamicData")]
     dynamic_data: Bytes,
 }
@@ -56,7 +56,7 @@ impl Log {
                 table_id: row.try_get("table_id")?,
                 key_tuple: key,
                 static_data: Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?),
-                encoded_lengths: row.try_get("encoded_lengths")?,
+                encoded_lengths: Bytes::from(row.try_get::<&str, Vec<u8>>("encoded_lengths")?),
                 dynamic_data: Bytes::from(row.try_get::<&str, Vec<u8>>("dynamic_data")?),
             },
         })
@@ -194,7 +194,7 @@ impl LogsQuery {
 
     fn to_sql(&self) -> String {
         format!(
-            "
+            r#"
             select
                 block_num,
                 log_idx,
@@ -202,13 +202,17 @@ impl LogsQuery {
                 table_id,
                 key,
                 static_data,
-                encoded_lengths,
+                CASE
+                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                    THEN '\x00'::bytea
+                    ELSE encoded_lengths
+                END AS encoded_lengths,
                 dynamic_data
             from records
             where not expired
             and not deleted
             and address = $1 {}
-            ",
+            "#,
             self.filters_sql()
         )
     }
@@ -236,7 +240,7 @@ mod tests {
         assert_eq!(
             fmt_sql(&query.to_sql()).expect("invalid sql"),
             fmt_sql(
-                "
+                r#"
                 select
                     block_num,
                     log_idx,
@@ -244,13 +248,17 @@ mod tests {
                     table_id,
                     key,
                     static_data,
-                    encoded_lengths,
+                    CASE
+                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                        THEN '\x00'::bytea
+                        ELSE encoded_lengths
+                    END AS encoded_lengths,
                     dynamic_data
                 from records
                 where not expired
                 and not deleted
                 and address = $1
-            "
+                "#
             )
             .unwrap()
         );
@@ -268,8 +276,20 @@ mod tests {
             }]),
         });
         assert_eq!(query.params.len(), 5);
-        assert_eq!(fmt_sql(&query.to_sql()).unwrap(), fmt_sql("
-            SELECT block_num, log_idx, address, table_id, key, static_data, encoded_lengths, dynamic_data
+        assert_eq!(fmt_sql(&query.to_sql()).unwrap(), fmt_sql(r#"
+            SELECT
+                block_num,
+                log_idx,
+                address,
+                table_id,
+                key,
+                static_data,
+                CASE
+                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                    THEN '\x00'::bytea
+                    ELSE encoded_lengths
+                END AS encoded_lengths,
+                dynamic_data
             FROM records
             WHERE NOT expired
             AND NOT deleted
@@ -278,6 +298,6 @@ mod tests {
                 (table_id = $2 AND sdec(key, 0, 32) = $3 AND sdec(key, 32, 32) = $4)
                 OR
                 (table_id = $5)
-            )").unwrap());
+        )"#).unwrap());
     }
 }
