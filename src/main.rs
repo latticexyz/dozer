@@ -214,10 +214,6 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
         .layer(TimeoutLayer::new(Duration::from_secs(10)))
         .layer(CompressionLayer::new());
 
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods(tower_http::cors::Any);
-
     let (app, listener) = (
         Router::new()
             .route("/", get(|| async { "hello\n" }))
@@ -226,7 +222,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             .route("/tables", post(api_tables::handle))
             .route("/api/logs", get(api_logs::handle))
             .layer(service)
-            .layer(cors)
+            .layer(CorsLayer::permissive())
             .with_state(config.clone()),
         tokio::net::TcpListener::bind(args.listen)
             .await
