@@ -152,11 +152,7 @@ impl Validator {
                 self.validate_expression(left)?;
                 self.validate_expression(right)
             }
-            ast::Expr::InList {
-                expr,
-                list,
-                negated,
-            } => {
+            ast::Expr::InList { expr, list, .. } => {
                 for e in list {
                     self.validate_expression(e)?;
                 }
