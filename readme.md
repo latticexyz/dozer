@@ -205,3 +205,23 @@ cargo build
 ## CLI
 
 For an up-to-date menu of CLI options please install and use the `-h` flag.
+
+## Backup
+
+Dozer will use pg_dump to backup the database and then it will
+upload the compressed backup to an S3 bucket. The S3 bucket is
+configured with a lifecycle policy such that we delete old backups.
+
+Here is the rough outline of _how_ dozer will preform the backup:
+
+1. Check the local directory for files named `dozer-backup-$unix_timestamp`
+2. Run pg_dump with the current time if the last backup was older than `--backup-window` or if there are no local backups
+3. Check the s3 bucket for object with keys named: `dozer-backup-$unix_timestamp`
+4. Upload the latest local backup if it is newer than the latest backup in S3 or if there are no remote backups
+5. Remove all but the latest local backup
+
+The backup routine will run whenever dozer is running unless the `no-backup` flag is set.
+
+The backup routine will be triggered from within dozer every 60s.
+
+There is also a `backup` sub-command if you want to trigger a backup without running a dozer server. See `dozer backup --help` for more details.
