@@ -152,6 +152,16 @@ impl Validator {
                 self.validate_expression(left)?;
                 self.validate_expression(right)
             }
+            ast::Expr::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                for e in list {
+                    self.validate_expression(e)?;
+                }
+                self.validate_expression(expr)
+            }
             _ => no!(expr),
         }
     }
@@ -333,6 +343,11 @@ mod tests {
             (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
                 "select foo.c, bar.c from foo, bar",
+                None,
+            ),
+            (
+                vec![test_schema("foo", vec!["c"])],
+                "select c from foo where c in ('foo', 'bar')",
                 None,
             ),
             (
