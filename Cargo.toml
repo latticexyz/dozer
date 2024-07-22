@@ -13,11 +13,14 @@
         "serde",
     ] }
     async-trait = "0.1"
+    aws-config = { version = "1.5.4", features = ["behavior-version-latest"] }
+    aws-sdk-s3 = "1.42.0"
     axum = "0.7.5"
     clap = { version = "4.5.4", features = ["derive", "env"] }
     deadpool-postgres = "0.14"
     eyre = "0.6.12"
     futures = "0.3"
+    humantime = "2.1.0"
     itertools = "0.13"
     metrics = "0.23"
     metrics-exporter-prometheus = "0.15"
@@ -31,7 +34,7 @@
     serde_json = { version = "1" }
     sqlparser = { version = "0.47", features = ["visitor"] }
     tabwriter = "1.4.0"
-    tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+    tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
     tokio-postgres = { version = "0.7.10", features = ["array-impls"] }
     tokio-stream = "0.1"
     tower = "0.4"

@@ -2,6 +2,7 @@ mod api;
 mod api_logs;
 mod api_sql;
 mod api_tables;
+mod backup;
 mod indexer;
 mod mud_encoding;
 mod mud_schema;
@@ -60,6 +61,9 @@ struct ServerArgs {
     ro_password: Option<String>,
 
     #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_backup: bool,
+
+    #[clap(long, action = clap::ArgAction::SetTrue)]
     no_index: bool,
 
     #[clap(long)]
@@ -70,10 +74,15 @@ struct ServerArgs {
 
     #[clap(long, default_value = "0.0.0.0:8000")]
     listen: String,
+
+    #[command(flatten)]
+    backup: backup::Args,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(name = "backup", about = "Pg_dump then upload to s3")]
+    Backup(ServerArgs),
     #[command(name = "re-index", about = "Re-index MUD schemas using records table")]
     Reindex(ServerArgs),
     #[command(name = "server", about = "Start indexing and serving API requests")]
@@ -92,7 +101,8 @@ async fn main() -> eyre::Result<()> {
         .compact();
     let filter_layer = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
+        .from_env_lossy()
+        .add_directive("aws=warn".parse().unwrap());
     tracing_subscriber::registry()
         .with(MetricsLayer::new())
         .with(fmt_layer)
@@ -103,6 +113,7 @@ async fn main() -> eyre::Result<()> {
     let http_client = reqwest::Client::new();
 
     match args.command {
+        Some(Commands::Backup(args)) => backup::run(&args.pg_url, &args.backup).await,
         Some(Commands::Table(args)) => api_tables::cli::request(&http_client, args).await,
         Some(Commands::Query(args)) => api_sql::cli::request(&http_client, args).await,
         Some(Commands::Server(args)) => server(args).await,
@@ -227,6 +238,19 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             .await
             .expect("binding to tcp for http server"),
     );
+
+    tokio::spawn(async move {
+        if args.no_backup {
+            println!("backups disabled");
+            return;
+        }
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            if let Err(e) = backup::run(&args.pg_url, &args.backup).await {
+                tracing::error!(error = %e);
+            }
+        }
+    });
 
     tokio::spawn(async move {
         if args.no_index {
