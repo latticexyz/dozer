@@ -3,52 +3,47 @@ use crate::{api, mud_schema};
 use alloy::{hex, primitives::Address};
 use axum::{extract::State, Json};
 use eyre::{Context, Result};
-use itertools::Itertools;
-use ruint::aliases::{U256, U64};
+use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::{types::Type, Transaction};
+
+type Row = Vec<Value>;
+type Rows = Vec<Row>;
 
 #[derive(Deserialize, Serialize)]
 pub struct Request {
     pub address: Address,
     pub query: String,
-    pub values: Vec<Value>,
 }
 
 #[tracing::instrument(skip_all)]
 pub async fn handle(
     State(state): State<api::Config>,
-    api::Json(req): api::Json<Request>,
-) -> Result<Json<Vec<Vec<Value>>>, api::Error> {
-    let mut vals = Vec::<Box<dyn ToSql + Sync + Send>>::new();
-    for val in req.values {
-        match val {
-            Value::Number(i) => vals.push(Box::new(U64::from(i.as_u64().unwrap()))),
-            Value::String(s) => vals.push(Box::new(hex::decode(s).unwrap())),
-            _ => {
-                return Err(api::Error::User(
-                    "values must be string or number".to_string(),
-                ))
-            }
-        }
+    api::Json(req): api::Json<Vec<Request>>,
+) -> Result<Json<Vec<Rows>>, api::Error> {
+    let mut pg = state.pool.get().await.wrap_err("getting conn from pool")?;
+    let pgtx = pg
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .wrap_err("starting sql api read tx")?;
+    let mut res: Vec<Rows> = Vec::new();
+    for r in req {
+        res.push(handle_single(&pgtx, r).await?)
     }
+    Ok(Json(res))
+}
 
-    let pg = state.pool.get().await.wrap_err("getting conn from pool")?;
-    let query = mud_schema::query::enhance(&pg, req.address, &req.query).await?;
-
-    let rows = pg
-        .query(
-            &dbg!(query),
-            &vals
-                .iter()
-                .map(|x| x.as_ref() as &(dyn ToSql + Sync))
-                .collect_vec(),
-        )
+async fn handle_single(pgtx: &Transaction<'_>, req: Request) -> Result<Rows, api::Error> {
+    let query = mud_schema::query::enhance(&pgtx, req.address, &req.query).await?;
+    let rows = pgtx
+        .query(&query, &[])
         .await
         .wrap_err("querying records table")?;
 
-    let mut result: Vec<Vec<Value>> = Vec::new();
+    let mut result: Rows = Vec::new();
     if let Some(first) = rows.first() {
         result.push(
             first
@@ -92,7 +87,7 @@ pub async fn handle(
         }
         result.push(json_row)
     }
-    Ok(Json(result))
+    Ok(result)
 }
 
 pub mod cli {
@@ -123,15 +118,16 @@ pub mod cli {
         let req_body = super::Request {
             address: args.address,
             query: args.query,
-            values: vec![],
         };
 
         let mut req_path = args.url.clone();
         req_path.set_path("/q");
-        let res = client_post::<Vec<Vec<Value>>, _>(&http_client, req_path, &req_body).await?;
+        let res =
+            client_post::<Vec<super::Rows>, _>(&http_client, req_path, &vec![req_body]).await?;
+        let rows = res.first().expect("no rows returned");
 
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
-        let out = res
+        let out = rows
             .iter()
             .map(|row| {
                 row.iter()

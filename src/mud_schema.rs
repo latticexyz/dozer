@@ -12,7 +12,7 @@ use eyre::{Result, WrapErr};
 use itertools::Itertools;
 use ruint::aliases::U64;
 use serde::{Deserialize, Serialize};
-use tokio_postgres::{Client, Row, Transaction};
+use tokio_postgres::{Row, Transaction};
 
 use crate::mud_encoding;
 
@@ -24,19 +24,20 @@ pub mod query {
     use itertools::Itertools;
     use sqlparser::{ast::visit_relations, dialect::PostgreSqlDialect, parser::Parser};
     use std::{collections::HashSet, ops::ControlFlow};
+    use tokio_postgres::Transaction;
 
     use super::Schema;
 
     const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
 
     pub async fn enhance(
-        pg: &tokio_postgres::Client,
+        pgtx: &Transaction<'_>,
         address: Address,
         user_query: &str,
     ) -> Result<String, api::Error> {
         let parsed_query =
             Parser::parse_sql(PG, user_query).map_err(|e| api::Error::User(e.to_string()))?;
-        let schemas = load_schemas(pg, address, &parsed_query).await?;
+        let schemas = load_schemas(pgtx, address, &parsed_query).await?;
         if schemas.len() == 0 {
             return Err(api::Error::User("no tables found in query".to_string()));
         }
@@ -44,7 +45,7 @@ pub mod query {
     }
 
     async fn load_schemas(
-        pg: &tokio_postgres::Client,
+        pgtx: &Transaction<'_>,
         address: Address,
         query: &Vec<sqlparser::ast::Statement>,
     ) -> Result<Vec<Schema>, api::Error> {
@@ -55,7 +56,7 @@ pub mod query {
             table_names.insert(relname);
             ControlFlow::<()>::Continue(())
         });
-        Ok(Schema::from_pg(pg, address, table_names.into_iter().collect()).await?)
+        Ok(Schema::from_pg(pgtx, address, table_names.into_iter().collect()).await?)
     }
 
     fn build_sql(user_query: &str, schemas: Vec<Schema>) -> Result<String, api::Error> {
@@ -435,13 +436,13 @@ impl Schema {
         })
     }
 
-    #[tracing::instrument]
+    #[tracing::instrument(skip_all, fields(address, tables))]
     pub async fn from_pg(
-        pg: &Client,
+        pgtx: &Transaction<'_>,
         address: Address,
         tables: Vec<String>,
     ) -> Result<Vec<Self>, tokio_postgres::Error> {
-        pg.query(
+        pgtx.query(
             r#"
                 select address, id, key_names, key_schema, val_names, val_schema
                 from tables
