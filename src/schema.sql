@@ -12,6 +12,21 @@ begin
 end;
 $$ language plpgsql strict immutable parallel safe cost 1;
 
+create or replace function b2n(b bytea)
+returns numeric as $$
+declare
+    n numeric := 0;
+begin
+    if length(b) > 32 then
+        raise exception 'input exceeds maximum length of 32 bytes';
+    end if;
+    for i in 1..length(b) loop
+        n:= n * 256 + get_byte(b, i - 1); -- Shift left by 8 bits and add current byte directly
+    end loop;
+    return n;
+end;
+$$ language plpgsql strict immutable parallel safe cost 1;
+
 create table if not exists blocks (num numeric primary key, hash bytea, parent bytea);
 
 create table if not exists records(
@@ -33,6 +48,10 @@ create index if not exists "records_all"
 on records(address, table_id, sdec(key, 0, 32), sdec(key, 32, 32))
 where not expired and not deleted;
 
+create index if not exists "records_all_static_num"
+on records(address, table_id, sdec(key, 0, 32), sdec(key, 32, 32), b2n(sdec(key, 0, 32)))
+where not expired and not deleted;
+
 create index if not exists "records_key_0" on records(sdec(key, 0, 32)) where not expired and not deleted;
 create index if not exists "records_key_1" on records(sdec(key, 32, 32)) where not expired and not deleted;
 
@@ -48,21 +67,6 @@ create table if not exists tables(
     val_names text[],
     primary key (address, id)
 );
-
-create or replace function b2n(b bytea)
-returns numeric as $$
-declare
-    n numeric := 0;
-begin
-    if length(b) > 32 then
-        raise exception 'input exceeds maximum length of 32 bytes';
-    end if;
-    for i in 1..length(b) loop
-        n:= n * 256 + get_byte(b, i - 1); -- Shift left by 8 bits and add current byte directly
-    end loop;
-    return n;
-end;
-$$ language plpgsql strict immutable parallel safe cost 1;
 
 create or replace function b2ab(data bytea, n int)
 returns bytea[] as $$
