@@ -62,7 +62,7 @@ begin
     end loop;
     return n;
 end;
-$$ language plpgsql strict immutable;
+$$ language plpgsql strict immutable parallel safe cost 1;
 
 create or replace function b2ab(data bytea, n int)
 returns bytea[] as $$
@@ -77,7 +77,7 @@ begin
     end loop;
     return parts;
 end;
-$$ language plpgsql;
+$$ language plpgsql immutable parallel safe cost 1;
 
 create or replace function b2an(data bytea, n int)
 returns numeric[] as $$
@@ -91,7 +91,7 @@ begin
     end loop;
     return parts;
 end;
-$$ language plpgsql;
+$$ language plpgsql immutable parallel safe cost 1;
 
 create or replace function ddec(encoded_lengths bytea, dynamic_data bytea, field int)
 returns bytea as $$
@@ -135,4 +135,4 @@ begin
     END LOOP;
     RETURN substring(dynamic_data FROM field_start FOR field_length);
 end;
-$$ language plpgsql strict immutable;
+$$ language plpgsql immutable parallel safe cost 1;
