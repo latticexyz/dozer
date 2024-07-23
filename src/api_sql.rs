@@ -3,7 +3,7 @@ use crate::{api, mud_schema};
 use alloy::{hex, primitives::Address};
 use axum::{extract::State, Json};
 use eyre::{Context, Result};
-use ruint::aliases::U256;
+use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_postgres::{types::Type, Transaction};
@@ -17,11 +17,17 @@ pub struct Request {
     pub query: String,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct Response {
+    pub block_height: U64,
+    pub result: Vec<Rows>,
+}
+
 #[tracing::instrument(skip_all)]
 pub async fn handle(
     State(state): State<api::Config>,
     api::Json(req): api::Json<Vec<Request>>,
-) -> Result<Json<Vec<Rows>>, api::Error> {
+) -> Result<Json<Response>, api::Error> {
     let mut pg = state.pool.get().await.wrap_err("getting conn from pool")?;
     let pgtx = pg
         .build_transaction()
@@ -33,7 +39,13 @@ pub async fn handle(
     for r in req {
         res.push(handle_single(&pgtx, r).await?)
     }
-    Ok(Json(res))
+    Ok(Json(Response {
+        block_height: pgtx
+            .query_one("select max(num)::text from blocks", &[])
+            .await?
+            .get(0),
+        result: res,
+    }))
 }
 
 async fn handle_single(pgtx: &Transaction<'_>, req: Request) -> Result<Rows, api::Error> {
@@ -112,6 +124,9 @@ pub mod cli {
 
         #[arg(short, long, help = "world address", env = "DOZER_ADDRESS")]
         pub address: Address,
+
+        #[arg(short = 'b', help = "print block height at query")]
+        pub block_height: bool,
     }
 
     pub async fn request(http_client: &Client, args: Request) -> Result<()> {
@@ -123,8 +138,12 @@ pub mod cli {
         let mut req_path = args.url.clone();
         req_path.set_path("/q");
         let res =
-            client_post::<Vec<super::Rows>, _>(&http_client, req_path, &vec![req_body]).await?;
-        let rows = res.first().expect("no rows returned");
+            client_post::<super::Response, _>(&http_client, req_path, &vec![req_body]).await?;
+        let rows = res.result.first().expect("no rows returned");
+
+        if args.block_height {
+            println!("block height: {}", res.block_height)
+        }
 
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
         let out = rows
