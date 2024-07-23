@@ -49,7 +49,8 @@ pub async fn handle(
             .map_err(|e| api::Error::Server(e.into()))
             .map(axum::Json)
         }
-        Query::Name(name) => {
+        Query::Name(mut name) => {
+            name.truncate(16);
             let mut q = String::from("select address, id, key_names, key_schema, val_names, val_schema from tables where name ilike $1");
             let mut params: Vec<Box<Param>> = vec![Box::new(name)];
             add_address(req.address, &mut q, &mut params);

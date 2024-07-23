@@ -50,7 +50,9 @@ pub mod query {
     ) -> Result<Vec<Schema>, api::Error> {
         let mut table_names = HashSet::new();
         visit_relations(query, |relation| {
-            table_names.insert(relation.to_string());
+            let mut relname = relation.to_string();
+            relname.truncate(16);
+            table_names.insert(relname);
             ControlFlow::<()>::Continue(())
         });
         Ok(Schema::from_pg(pg, address, table_names.into_iter().collect()).await?)
