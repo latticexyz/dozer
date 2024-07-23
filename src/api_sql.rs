@@ -19,7 +19,7 @@ pub struct Request {
 
 #[derive(Deserialize, Serialize)]
 pub struct Response {
-    pub block_height: U64,
+    pub block_height: u64,
     pub result: Vec<Rows>,
 }
 
@@ -43,7 +43,8 @@ pub async fn handle(
         block_height: pgtx
             .query_one("select max(num)::text from blocks", &[])
             .await?
-            .get(0),
+            .get::<usize, U64>(0)
+            .to::<u64>(),
         result: res,
     }))
 }
