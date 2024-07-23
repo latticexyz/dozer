@@ -82,6 +82,10 @@ pub async fn handle(
                     let s: String = row.get(idx);
                     Value::String(s)
                 }
+                Type::NUMERIC_ARRAY => {
+                    let nums: Vec<U256> = row.get(idx);
+                    serde_json::json!(nums.iter().map(|n| n.to_string()).collect::<Vec<String>>())
+                }
                 _ => Value::Null,
             };
             json_row.push(value);
@@ -131,7 +135,15 @@ pub mod cli {
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|r| r.as_str().unwrap_or_default().to_string())
+                    .map(|r| match r {
+                        Value::Array(_) => r
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|item| item.as_str().unwrap_or_default().to_string())
+                            .join(","),
+                        _ => r.as_str().unwrap_or_default().to_string(),
+                    })
                     .collect::<Vec<String>>()
                     .join("\t")
             })

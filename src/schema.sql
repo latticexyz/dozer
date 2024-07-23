@@ -79,6 +79,20 @@ begin
 end;
 $$ language plpgsql;
 
+create or replace function b2an(data bytea, n int)
+returns numeric[] as $$
+declare
+    nparts int;
+    parts numeric[] = array[]::numeric[];
+begin
+    nparts := ceil(length(data) / n::float);
+    for i in 0..(nparts- 1) loop
+        parts := array_append(parts, b2n(substring(data, (i * n) + 1, n)));
+    end loop;
+    return parts;
+end;
+$$ language plpgsql;
+
 create or replace function ddec(encoded_lengths bytea, dynamic_data bytea, field int)
 returns bytea as $$
 declare

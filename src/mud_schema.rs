@@ -196,7 +196,7 @@ mod field {
             match self {
                 Dynamic::Bytea => String::from("bytes"),
                 Dynamic::Text => String::from("string"),
-                Dynamic::Array(s) => s.description(),
+                Dynamic::Array(s) => s.description() + "[]",
             }
         }
     }
@@ -528,6 +528,10 @@ impl Schema {
         String::from_utf8(b).unwrap()
     }
 
+    fn num_static(&self) -> usize {
+        self.val_schema[2] as usize
+    }
+
     pub fn cte_sql(&self) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
         res.push(format!("{} as (", self.table_name()));
@@ -555,22 +559,23 @@ impl Schema {
             let schema_type = field::Kind::from_schema_type(self.key_schema[4 + pos]).unwrap();
             return schema_type.key_sql(pos, name);
         }
-        let mut pos = self
+        let pos = self
             .val_names
             .iter()
             .position(|n| n == name)
             .ok_or(api::Error::User(format!("column '{}' not found", name)))?;
-
         let schema_type = field::Kind::from_schema_type(self.val_schema[4 + pos]).unwrap();
-        if matches!(schema_type, field::Kind::Static(_)) {
-            pos = self
+
+        let pos = match schema_type {
+            field::Kind::Static(_) => self
                 .val_schema
                 .iter()
                 .skip(4)
                 .take(pos)
                 .map(|b| field::Kind::from_schema_type(*b).unwrap().size().unwrap())
-                .sum()
-        }
+                .sum(),
+            field::Kind::Dynamic(_) => pos - self.num_static(),
+        };
         Ok(schema_type.val_sql(pos, name))
     }
 }
