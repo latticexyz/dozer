@@ -49,7 +49,7 @@ on records(address, table_id, sdec(key, 0, 32), sdec(key, 32, 32))
 where not expired and not deleted;
 
 create index if not exists "records_all_static_num"
-on records(address, table_id, sdec(key, 0, 32), sdec(key, 32, 32), b2n(sdec(key, 0, 32)))
+on records(address, table_id, sdec(key, 0, 32), sdec(key, 32, 32), b2n(sdec(static_data, 0, 32)))
 where not expired and not deleted;
 
 create index if not exists "records_key_0" on records(sdec(key, 0, 32)) where not expired and not deleted;
