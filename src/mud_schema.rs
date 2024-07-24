@@ -66,7 +66,7 @@ pub mod query {
         query.push(
             schemas
                 .iter()
-                .sorted_by_key(|s| s.qname())
+                .sorted_by_key(|s| s.full_name())
                 .map(|s| s.cte_sql())
                 .collect::<Result<Vec<_>, _>>()?
                 .join(","),
@@ -88,7 +88,7 @@ pub mod query {
         #[test]
         fn test_enhance() {
             let user_query = String::from(
-                "select __foo.value, __bar.value from __foo, __bar where __foo.value = __bar.value",
+                "select foo.value, bar.value from foo,bar where foo.value = bar.value",
             );
             let pq = build_sql(
                 &user_query,
@@ -124,21 +124,21 @@ pub mod query {
             assert_eq!(
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
-                    with __bar as (
+                    with bar as (
                         select b2n(sdec(static_data, 0, 4)) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
                         and not expired
                         and not deleted
-                    ), __foo as (
+                    ), foo as (
                         select b2n(sdec(static_data, 0, 4)) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
                         and not expired
                         and not deleted
-                    ) select __foo.value, __bar.value from __foo, __bar where __foo.value = __bar.value
+                    ) select foo.value, bar.value from foo,bar where foo.value = bar.value
                 "#).unwrap()
         )
         }
@@ -379,6 +379,32 @@ mod field {
     }
 }
 
+fn encode_resource_id(name: &str) -> Result<FixedBytes<30>, api::Error> {
+    let name = name.strip_prefix("__").unwrap_or(name);
+    let (mut id, parts) = (FixedBytes::<30>::ZERO, name.split("__").collect_vec());
+    match parts.len() {
+        1 => {
+            let mut name = parts[0].as_bytes().to_vec();
+            name.resize(16, 0x00);
+            id[14..].copy_from_slice(&name[..]);
+            Ok(id)
+        }
+        2 => {
+            let mut ns = parts[0].as_bytes().to_vec();
+            ns.resize(14, 0x00);
+            id[..14].copy_from_slice(&ns[..]);
+            let mut name = parts[1].as_bytes().to_vec();
+            name.resize(16, 0x00);
+            id[14..].copy_from_slice(&name[..]);
+            Ok(id)
+        }
+        _ => Err(api::Error::User(format!(
+            "unable to parse table name: {}",
+            name
+        ))),
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Schema {
     pub address: FixedBytes<20>,
@@ -444,33 +470,26 @@ impl Schema {
         pgtx: &Transaction<'_>,
         address: Address,
         tables: Vec<String>,
-    ) -> Result<Vec<Self>, tokio_postgres::Error> {
-        fn parse_qname(qname: &str) -> FixedBytes<30> {
-            let parts: Vec<&str> = qname.split("__").collect();
-            let (mut ns, mut name) = (parts[0].as_bytes().to_vec(), parts[1].as_bytes().to_vec());
-            ns.resize(14, 0x00);
-            name.resize(16, 0x00);
-            ns.extend(name);
-            FixedBytes::<30>::from_slice(&ns)
-        }
-        let ids: Vec<FixedBytes<30>> = tables
+    ) -> Result<Vec<Self>, api::Error> {
+        let ids = tables
             .iter()
-            .filter(|name| name.contains("__"))
-            .map(|name| parse_qname(name))
-            .collect();
-        pgtx.query(
-            r#"
+            .map(|name| encode_resource_id(name))
+            .collect::<Result<Vec<FixedBytes<30>>, _>>()?;
+        let res = pgtx
+            .query(
+                r#"
                 select address, id, key_names, key_schema, val_names, val_schema
                 from tables
                 where address = $1
                 and substring(id from 3 for 30) = any($2)
             "#,
-            &[&address.0, &ids],
-        )
-        .await?
-        .iter()
-        .map(Schema::from_row)
-        .collect::<Result<Vec<Schema>, _>>()
+                &[&address.0, &ids],
+            )
+            .await?
+            .iter()
+            .map(Schema::from_row)
+            .collect::<Result<Vec<Schema>, _>>()?;
+        Ok(res)
     }
 
     #[tracing::instrument(level="debug" skip_all)]
@@ -492,7 +511,7 @@ impl Schema {
                 &U64::from(log_idx),
                 &address,
                 &self.table_id,
-                &self.table_name(),
+                &self.name(),
                 &self.key_schema,
                 &self.val_schema,
                 &self.key_names,
@@ -506,7 +525,7 @@ impl Schema {
 
     pub fn description(&self) -> String {
         let mut lines = Vec::new();
-        lines.push(format!("Name: {}", self.table_name()));
+        lines.push(format!("Name: {}", self.name()));
         lines.push(format!("\tId:\t{}", self.table_id));
         lines.push(format!("\tAddress:\t{}", self.address));
         lines.push(format!("\tNamespace:\t{}", self.namespace()));
@@ -524,31 +543,28 @@ impl Schema {
         lines.join("\n")
     }
 
-    pub fn has_column(&self, col_name: &str) -> bool {
-        self.key_names.iter().any(|name| name == col_name)
-            || self.val_names.iter().any(|name| name == col_name)
+    pub fn has_column(&self, name: &str) -> bool {
+        self.key_names.iter().any(|n| n == name) || self.val_names.iter().any(|n| n == name)
     }
 
-    pub fn qname(&self) -> String {
-        format!("{}__{}", self.namespace(), self.table_name())
+    pub fn full_name(&self) -> String {
+        if self.namespace().len() > 0 {
+            vec![self.namespace(), self.name()].join("__")
+        } else {
+            self.name()
+        }
     }
 
     fn namespace(&self) -> String {
-        let b: Vec<u8> = self.table_id[2..15]
-            .iter()
-            .map(|c| *c)
-            .filter(|c| *c > 0 && *c < 255) //ascii table names
-            .collect();
-        String::from_utf8(b).unwrap()
+        String::from_utf8(self.table_id[2..15].to_vec())
+            .expect("unable to utf8 decode namespace")
+            .replace('\0', "")
     }
 
-    fn table_name(&self) -> String {
-        let b: Vec<u8> = self.table_id[15..32]
-            .iter()
-            .map(|c| *c)
-            .filter(|c| *c > 0 && *c < 255) //ascii table names
-            .collect();
-        String::from_utf8(b).unwrap()
+    fn name(&self) -> String {
+        String::from_utf8(self.table_id[15..32].to_vec())
+            .expect("unable to utf8 decode table name")
+            .replace('\0', "")
     }
 
     fn num_static(&self) -> usize {
@@ -557,7 +573,7 @@ impl Schema {
 
     pub fn cte_sql(&self) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
-        res.push(format!("{} as (", self.qname()));
+        res.push(format!("{} as (", self.full_name()));
         res.push("select".to_string());
         if let Some(sl) = &self.select_list {
             res.push(

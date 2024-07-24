@@ -145,7 +145,6 @@ pub mod cli {
         if args.block_height {
             println!("block height: {}", res.block_height)
         }
-
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
         let out = rows
             .iter()
