@@ -39,7 +39,7 @@ pub mod query {
             Parser::parse_sql(PG, user_query).map_err(|e| api::Error::User(e.to_string()))?;
         let schemas = load_schemas(pgtx, address, &parsed_query).await?;
         if schemas.len() == 0 {
-            return Err(api::Error::User("no tables found in query".to_string()));
+            return Err(api::Error::User("schemas not found".to_string()));
         }
         build_sql(user_query, schemas)
     }
@@ -52,7 +52,7 @@ pub mod query {
         let mut table_names = HashSet::new();
         visit_relations(query, |relation| {
             let mut relname = relation.to_string();
-            relname.truncate(16);
+            relname.truncate(30);
             table_names.insert(relname);
             ControlFlow::<()>::Continue(())
         });
@@ -66,7 +66,7 @@ pub mod query {
         query.push(
             schemas
                 .iter()
-                .sorted_by_key(|s| s.table_name())
+                .sorted_by_key(|s| s.qname())
                 .map(|s| s.cte_sql())
                 .collect::<Result<Vec<_>, _>>()?
                 .join(","),
@@ -88,7 +88,7 @@ pub mod query {
         #[test]
         fn test_enhance() {
             let user_query = String::from(
-                "select foo.value, bar.value from foo, bar where foo.value = bar.value",
+                "select __foo.value, __bar.value from __foo, __bar where __foo.value = __bar.value",
             );
             let pq = build_sql(
                 &user_query,
@@ -96,7 +96,7 @@ pub mod query {
                     Schema {
                         address: fixed_bytes!(),
                         table_id: fixed_bytes!(
-                            "74620000000000000000000000000000666f6f00000000000000000000000000"
+                            "00000000000000000000000000000000666f6f00000000000000000000000000"
                         ),
                         key_names: vec![],
                         val_names: vec![String::from("value")],
@@ -109,7 +109,7 @@ pub mod query {
                     Schema {
                         address: fixed_bytes!(),
                         table_id: fixed_bytes!(
-                            "7462000000000000000000000000000062617200000000000000000000000000"
+                            "0000000000000000000000000000000062617200000000000000000000000000"
                         ),
                         key_names: vec![],
                         val_names: vec![String::from("value")],
@@ -124,21 +124,21 @@ pub mod query {
             assert_eq!(
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
-                    with bar as (
+                    with __bar as (
                         select b2n(sdec(static_data, 0, 4)) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
-                        and table_id = '\x7462000000000000000000000000000062617200000000000000000000000000'
+                        and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
                         and not expired
                         and not deleted
-                    ) ,foo as (
+                    ), __foo as (
                         select b2n(sdec(static_data, 0, 4)) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
-                        and table_id = '\x74620000000000000000000000000000666f6f00000000000000000000000000'
+                        and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
                         and not expired
                         and not deleted
-                    ) select foo.value, bar.value from foo, bar where foo.value = bar.value
+                    ) select __foo.value, __bar.value from __foo, __bar where __foo.value = __bar.value
                 "#).unwrap()
         )
         }
@@ -442,14 +442,27 @@ impl Schema {
         address: Address,
         tables: Vec<String>,
     ) -> Result<Vec<Self>, tokio_postgres::Error> {
+        fn parse_qname(qname: &str) -> FixedBytes<30> {
+            let parts: Vec<&str> = qname.split("__").collect();
+            let (mut ns, mut name) = (parts[0].as_bytes().to_vec(), parts[1].as_bytes().to_vec());
+            ns.resize(14, 0x00);
+            name.resize(16, 0x00);
+            ns.extend(name);
+            FixedBytes::<30>::from_slice(&ns)
+        }
+        let ids: Vec<FixedBytes<30>> = tables
+            .iter()
+            .filter(|name| name.contains("__"))
+            .map(|name| parse_qname(name))
+            .collect();
         pgtx.query(
             r#"
                 select address, id, key_names, key_schema, val_names, val_schema
                 from tables
                 where address = $1
-                and name = ANY($2)
+                and substring(id from 3 for 30) = any($2)
             "#,
-            &[&address.0, &tables],
+            &[&address.0, &ids],
         )
         .await?
         .iter()
@@ -513,7 +526,11 @@ impl Schema {
             || self.val_names.iter().any(|name| name == col_name)
     }
 
-    pub fn namespace(&self) -> String {
+    pub fn qname(&self) -> String {
+        format!("{}__{}", self.namespace(), self.table_name())
+    }
+
+    fn namespace(&self) -> String {
         let b: Vec<u8> = self.table_id[2..15]
             .iter()
             .map(|c| *c)
@@ -522,7 +539,7 @@ impl Schema {
         String::from_utf8(b).unwrap()
     }
 
-    pub fn table_name(&self) -> String {
+    fn table_name(&self) -> String {
         let b: Vec<u8> = self.table_id[15..32]
             .iter()
             .map(|c| *c)
@@ -537,7 +554,7 @@ impl Schema {
 
     pub fn cte_sql(&self) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
-        res.push(format!("{} as (", self.table_name()));
+        res.push(format!("{} as (", self.qname()));
         res.push("select".to_string());
         if let Some(sl) = &self.select_list {
             res.push(
