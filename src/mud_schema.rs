@@ -124,14 +124,14 @@ pub mod query {
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
                     with bar as (
-                        select b2n(sdec(static_data, 0, 4)) as value
+                        select b2n(sdec(static_data, 0, 4)) as "value"
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
                         and not expired
                         and not deleted
                     ), foo as (
-                        select b2n(sdec(static_data, 0, 4)) as value
+                        select b2n(sdec(static_data, 0, 4)) as "value"
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
@@ -241,14 +241,16 @@ mod field {
             match self {
                 Kind::Static(t) => match t {
                     Static::Num(_, _) => {
-                        Ok(format!("b2n(sdec(key, {}, 32)) as {}", 32 * pos, name))
+                        Ok(format!("b2n(sdec(key, {}, 32)) as \"{}\"", 32 * pos, name))
                     }
                     Static::Bytea(_, Desc::Address) => Ok(format!(
-                        "substring(sdec(key, {}, 32) from 13 for 20) as {}",
+                        "substring(sdec(key, {}, 32) from 13 for 20) as \"{}\"",
                         32 * pos,
                         name
                     )),
-                    Static::Bytea(_, _) => Ok(format!("sdec(key, {}, 32) as {}", 32 * pos, name)),
+                    Static::Bytea(_, _) => {
+                        Ok(format!("sdec(key, {}, 32) as \"{}\"", 32 * pos, name))
+                    }
                 },
                 _ => Err(api::Error::User("key must be static".to_string())),
             }
@@ -258,41 +260,44 @@ mod field {
             match self {
                 Kind::Static(t) => match t {
                     Static::Num(size, _) => {
-                        format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
+                        format!("b2n(sdec(static_data, {}, {})) as \"{}\"", pos, size, name)
                     }
                     Static::Bytea(size, Desc::Address) => {
                         format!(
-                            "substring(sdec(static_data, {}, {}) from 13 for 20) as {}",
+                            "substring(sdec(static_data, {}, {}) from 13 for 20) as \"{}\"",
                             pos, size, name
                         )
                     }
                     Static::Bytea(_, Desc::Bool) => {
-                        format!("get_byte(static_data, {}) = 1 as {}", pos, name)
+                        format!("get_byte(static_data, {}) = 1 as \"{}\"", pos, name)
                     }
                     Static::Bytea(size, _) => {
-                        format!("sdec(static_data, {}, {}) as {}", pos, size, name)
+                        format!("sdec(static_data, {}, {}) as \"{}\"", pos, size, name)
                     }
                 },
                 Kind::Dynamic(t) => match t {
                     Dynamic::Bytea => {
-                        format!("ddec(encoded_lengths, dynamic_data, {}) as {}", pos, name)
+                        format!(
+                            "ddec(encoded_lengths, dynamic_data, {}) as \"{}\"",
+                            pos, name
+                        )
                     }
                     Dynamic::Text => {
                         format!(
-                            r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, {}), '\x00'), 'UTF8') as {}"#,
+                            r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, {}), '\x00'), 'UTF8') as "{}""#,
                             pos, name
                         )
                     }
                     Dynamic::Array(it) => match it {
                         Static::Bytea(size, _) => {
                             format!(
-                                "b2ab(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
+                                "b2ab(ddec(encoded_lengths, dynamic_data, {}), {}) as \"{}\"",
                                 pos, size, name
                             )
                         }
                         Static::Num(size, _) => {
                             format!(
-                                "b2an(ddec(encoded_lengths, dynamic_data, {}), {}) as {}",
+                                "b2an(ddec(encoded_lengths, dynamic_data, {}), {}) as \"{}\"",
                                 pos, size, name
                             )
                         }
@@ -343,27 +348,27 @@ mod field {
         fn test_to_sql() {
             assert_eq!(
                 Kind::Static(Static::Num(32, Desc::Uint)).val_sql(1, "foo"),
-                "b2n(sdec(static_data, 1, 32)) as foo"
+                "b2n(sdec(static_data, 1, 32)) as \"foo\""
             );
             assert_eq!(
                 Kind::Static(Static::Bytea(32, Desc::Bytes)).val_sql(1, "foo"),
-                "sdec(static_data, 1, 32) as foo"
+                "sdec(static_data, 1, 32) as \"foo\""
             );
             assert_eq!(
                 Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))).val_sql(0, "foo"),
-                "b2ab(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
+                "b2ab(ddec(encoded_lengths, dynamic_data, 0), 32) as \"foo\""
             );
             assert_eq!(
                 Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))).val_sql(0, "foo"),
-                "b2an(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
+                "b2an(ddec(encoded_lengths, dynamic_data, 0), 32) as \"foo\""
             );
             assert_eq!(
                 Kind::Dynamic(Dynamic::Bytea).val_sql(0, "foo"),
-                "ddec(encoded_lengths, dynamic_data, 0) as foo"
+                "ddec(encoded_lengths, dynamic_data, 0) as \"foo\""
             );
             assert_eq!(
                 Kind::Dynamic(Dynamic::Text).val_sql(0, "foo"),
-                r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, 0), '\x00'), 'UTF8') as foo"#
+                r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, 0), '\x00'), 'UTF8') as "foo""#
             );
         }
         #[test]
@@ -638,7 +643,7 @@ mod schema_tests {
         };
         assert_eq!(
             schema.col_sql("value").unwrap(),
-            "b2n(sdec(static_data, 0, 4)) as value"
+            "b2n(sdec(static_data, 0, 4)) as \"value\""
         )
     }
 }
