@@ -158,6 +158,7 @@ pub mod cli {
                             .iter()
                             .map(|item| item.as_str().unwrap_or_default().to_string())
                             .join(","),
+                        Value::Bool(b) => format!("{}", b),
                         _ => r.as_str().unwrap_or_default().to_string(),
                     })
                     .collect::<Vec<String>>()
