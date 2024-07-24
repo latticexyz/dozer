@@ -26,9 +26,10 @@ pub fn validate(
         .into_iter()
         .map(|mut s| {
             s.select_list = Some(HashSet::new());
-            (s.qname(), s)
+            (s.full_name(), s)
         })
         .collect();
+    println!("schemas: {:?}", schemas);
     let mut validator = Validator { schemas };
     validator.validate(query)?;
     Ok(validator.schemas.into_iter().map(|(_, v)| v).collect())
@@ -205,7 +206,7 @@ impl Validator {
             .collect();
         match matched_schemas.len() {
             1 => {
-                let qname = matched_schemas.first().unwrap().qname();
+                let qname = matched_schemas.first().unwrap().full_name();
                 if let Some(schema) = self.schemas.get_mut(&qname) {
                     schema
                         .select_list
@@ -217,13 +218,17 @@ impl Validator {
             0 => Err(api::Error::User(format!(
                 "column {} not found in {}",
                 id.value,
-                self.schemas.values().map(|s| s.qname()).join(","),
+                self.schemas.values().map(|s| s.full_name()).join(","),
             ))),
             _ => {
                 return Err(api::Error::User(format!(
                     "{} references more than one table: {}",
                     id.value,
-                    matched_schemas.iter().map(|s| s.qname()).sorted().join(","),
+                    matched_schemas
+                        .iter()
+                        .map(|s| s.full_name())
+                        .sorted()
+                        .join(","),
                 )))
             }
         }
@@ -252,7 +257,7 @@ impl Validator {
                 if !self
                     .schemas
                     .values()
-                    .map(|s| s.qname())
+                    .map(|s| s.full_name())
                     .collect::<Vec<String>>()
                     .contains(&name_parts[0].value.to_string())
                 {
@@ -274,7 +279,7 @@ mod tests {
 
     fn check_query(schemas: Vec<mud_schema::Schema>, query: &str, want: Option<&str>) {
         let mut v = Validator {
-            schemas: schemas.into_iter().map(|s| (s.qname(), s)).collect(),
+            schemas: schemas.into_iter().map(|s| (s.full_name(), s)).collect(),
         };
         match want {
             Some(msg) => match v.validate(query) {
@@ -311,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_select_list() {
-        let schemas = validate("select c from __foo", vec![test_schema("foo", vec!["c"])])
+        let schemas = validate("select c from foo", vec![test_schema("foo", vec!["c"])])
             .expect("validating query");
         assert_eq!(schemas.len(), 1);
 
@@ -329,22 +334,22 @@ mod tests {
         vec![
             (
                 vec![test_schema("foo", vec!["c"])],
-                "select c from __foo",
+                "select c from foo",
                 None,
             ),
             (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
-                "select __foo.c, __bar.c from __foo, __bar",
+                "select foo.c, bar.c from foo, bar",
                 None,
             ),
             (
                 vec![test_schema("foo", vec!["c"])],
-                "select c from __foo where c in ('foo', 'bar')",
+                "select c from foo where c in ('foo', 'bar')",
                 None,
             ),
             (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
-                "select __foo.c, __bar.c from __foo, __bar where __foo.c = __bar.c",
+                "select foo.c, bar.c from foo, bar where foo.c = bar.c",
                 None,
             ),
         ]
@@ -357,17 +362,17 @@ mod tests {
         vec![
             (
                 vec![test_schema("foo", vec![])],
-                "truncate __foo",
+                "truncate foo",
                 Some("select queries only"),
             ),
             (
                 vec![test_schema("foo", vec![])],
-                "with foo as (select 1) select * from __foo",
+                "with foo as (select 1) select * from foo",
                 Some("with not supported"),
             ),
             (
                 vec![test_schema("foo", vec![])],
-                "select col from __foo for update",
+                "select col from foo for update",
                 Some("for update not supported"),
             ),
             (
@@ -377,27 +382,27 @@ mod tests {
             ),
             (
                 vec![test_schema("foo", vec!["c"])],
-                "select c from __bar",
-                Some("no schema found for table: __bar"),
+                "select c from bar",
+                Some("no schema found for table: bar"),
             ),
             (
                 vec![test_schema("foo", vec!["c"])],
-                "select d from __foo",
-                Some("column d not found in __foo"),
+                "select d from foo",
+                Some("column d not found in foo"),
             ),
             (
                 vec![test_schema("foo", vec!["c"])],
-                "select c from __bar",
-                Some("no schema found for table: __bar"),
+                "select c from bar",
+                Some("no schema found for table: bar"),
             ),
             (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
-                "select c from __foo, __bar",
-                Some("c references more than one table: __bar,__foo"),
+                "select c from foo, bar",
+                Some("c references more than one table: bar,foo"),
             ),
             (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
-                "select __foo.c, __bar.c, baz.d from __foo, __bar",
+                "select foo.c, bar.c, baz.d from foo, bar",
                 Some("table baz not defined in query"),
             ),
         ]
