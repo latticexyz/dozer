@@ -76,9 +76,7 @@ impl axum::response::IntoResponse for Error {
                 )
             }
         };
-        let m = ErrorMessage {
-            msg: String::from(message),
-        };
+        let m = ErrorMessage { msg: message };
         (status, axum::Json(m)).into_response()
     }
 }

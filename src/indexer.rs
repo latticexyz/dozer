@@ -203,9 +203,7 @@ async fn next_to_index<F: EthApi>(
     for _ in 0..max_reorg {
         let latest_remote = remote.block(BlockNumberOrTag::Latest).await?;
         let remote_num = latest_remote.header.number.unwrap();
-        let (local_num, local_hash) = get_local_latest(&pgtx)
-            .await
-            .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?;
+        let (local_num, local_hash) = get_local_latest(pgtx).await.map_err(IndexError::Retry)?;
         let local_num: u64 = local_num.to();
 
         tracing::Span::current()
@@ -296,7 +294,7 @@ pub async fn index<T: EthApi>(
     pgtx.commit().await.wrap_err("unable to commit tx")?;
 
     let filter = Filter::new()
-        .events(&[
+        .events([
             &Store_SetRecord::SIGNATURE,
             &Store_SpliceDynamicData::SIGNATURE,
             &Store_SpliceStaticData::SIGNATURE,
@@ -320,7 +318,7 @@ pub async fn index<T: EthApi>(
     let tx = pg.transaction().await.wrap_err("opening index tx")?;
     for u in &updates {
         if u.table_id == Schema::TABLES_TABLE_ID {
-            save_table(&tx, &u).await?;
+            save_table(&tx, u).await?;
         }
     }
     let mut records = Record::load(&tx, record_ids).await?;
@@ -374,7 +372,7 @@ async fn save_table(pgtx: &Transaction<'_>, update: &Update) -> Result<(), Index
         let schema = &Schema::from_data(
             update.address,
             key,
-            &mud_encoding::Data::new(&static_data, *encoded_lengths, &dynamic_data)?,
+            &mud_encoding::Data::new(static_data, *encoded_lengths, dynamic_data)?,
         )?;
         schema
             .insert(pgtx, update.block_num, update.log_idx, update.address)
@@ -636,13 +634,13 @@ impl Update {
             *log.address(),
             log.log_index.wrap_err("missing log idx from log")?,
         );
-        match log.topics().first().unwrap_or_default() {
-            &Store_SetRecord::SIGNATURE_HASH => {
+        match *log.topics().first().unwrap_or_default() {
+            Store_SetRecord::SIGNATURE_HASH => {
                 let rec = Store_SetRecord::decode_log_data(log.data(), true)
                     .wrap_err("decoding set record")?;
                 Ok(Some(Update {
-                    block_num: block_num,
-                    log_idx: log_idx,
+                    block_num,
+                    log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
                     key: flatten_key(rec.key_tuple),
@@ -653,12 +651,12 @@ impl Update {
                     },
                 }))
             }
-            &Store_SpliceDynamicData::SIGNATURE_HASH => {
+            Store_SpliceDynamicData::SIGNATURE_HASH => {
                 let rec = Store_SpliceDynamicData::decode_log_data(log.data(), true)
                     .wrap_err("decoding splice dynamic")?;
                 Ok(Some(Update {
-                    block_num: block_num,
-                    log_idx: log_idx,
+                    block_num,
+                    log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
                     key: flatten_key(rec.key_tuple),
@@ -670,12 +668,12 @@ impl Update {
                     },
                 }))
             }
-            &Store_SpliceStaticData::SIGNATURE_HASH => {
+            Store_SpliceStaticData::SIGNATURE_HASH => {
                 let rec = Store_SpliceStaticData::decode_log_data(log.data(), true)
                     .wrap_err("decoding splice static")?;
                 Ok(Some(Update {
-                    block_num: block_num,
-                    log_idx: log_idx,
+                    block_num,
+                    log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
                     key: flatten_key(rec.key_tuple),
@@ -685,12 +683,12 @@ impl Update {
                     },
                 }))
             }
-            &Store_DeleteRecord::SIGNATURE_HASH => {
+            Store_DeleteRecord::SIGNATURE_HASH => {
                 let rec = Store_DeleteRecord::decode_log_data(log.data(), true)
                     .wrap_err("decoding delete record")?;
                 Ok(Some(Update {
-                    block_num: block_num,
-                    log_idx: log_idx,
+                    block_num,
+                    log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
                     key: flatten_key(rec.key_tuple),
@@ -718,7 +716,7 @@ fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: &Bytes) {
 
 #[cfg(test)]
 mod tests {
-    static SCHEMA: &'static str = include_str!("./schema.sql");
+    static SCHEMA: &str = include_str!("./schema.sql");
 
     use alloy::primitives::{Address, LogData, B256};
     use postgresql_embedded::{PostgreSQL, Settings, Version};
@@ -741,8 +739,10 @@ mod tests {
     }
 
     async fn test_pg() -> (PostgreSQL, Client) {
-        let mut pg_settings = Settings::default();
-        pg_settings.version = Version::new(16, Some(2), Some(3));
+        let pg_settings = Settings {
+            version: Version::new(16, Some(2), Some(3)),
+            ..Default::default()
+        };
         let mut db = PostgreSQL::new(pg_settings);
         db.setup().await.expect("setting up pg");
         db.start().await.expect("starting pg");
@@ -844,17 +844,20 @@ mod tests {
         )
     }
 
-    struct TestGetRemote(Block, Vec<Log>);
+    struct TestGetRemote {
+        block: Block,
+        logs: Vec<Log>,
+    }
 
     #[async_trait]
     impl EthApi for TestGetRemote {
         async fn logs(&self, _: Filter) -> eyre::Result<Vec<Log>, IndexError> {
-            Ok(self.1.clone())
+            Ok(self.logs.clone())
         }
         async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError> {
             match n {
                 BlockNumberOrTag::Number(n) => Ok(test_block(n, n as u8, (n - 1) as u8)),
-                BlockNumberOrTag::Latest => Ok(self.0.clone()),
+                BlockNumberOrTag::Latest => Ok(self.block.clone()),
                 _ => panic!("ah"),
             }
         }
@@ -882,8 +885,8 @@ mod tests {
         {
             super::index(
                 &TestGetRemote {
-                    0: test_block(1, 1, 0),
-                    1: vec![
+                    block: test_block(1, 1, 0),
+                    logs: vec![
                         sr(test_block(1, 1, 0), 1, rid1.clone()),
                         ss(
                             test_block(1, 1, 0),
@@ -910,8 +913,8 @@ mod tests {
         {
             super::index(
                 &TestGetRemote {
-                    0: test_block(2, 2, 1),
-                    1: vec![ss(
+                    block: test_block(2, 2, 1),
+                    logs: vec![ss(
                         test_block(2, 2, 1),
                         2,
                         rid1.clone(),
@@ -946,8 +949,8 @@ mod tests {
         .expect("setting up blocks table");
 
         let trg = TestGetRemote {
-            0: test_block(10, 10, 9),
-            1: vec![],
+            block: test_block(10, 10, 9),
+            logs: vec![],
         };
         let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
         assert_eq!(next_range.from.num, 1);
@@ -985,8 +988,8 @@ mod tests {
         .expect("setting up blocks table");
 
         let trg = TestGetRemote {
-            0: test_block(2, 2, 1),
-            1: vec![],
+            block: test_block(2, 2, 1),
+            logs: vec![],
         };
         next_to_index(&pgtx, &trg, 2, 2).await.unwrap();
 

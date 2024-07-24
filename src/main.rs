@@ -24,7 +24,6 @@ use metrics_util::layers::Layer as MetricsUtilLayer;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
 use std::{future::ready, process::exit, str::FromStr, time::Duration};
-use tokio::{self};
 use tower_http::{
     compression::CompressionLayer, cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer,
 };
@@ -32,7 +31,7 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use url::Url;
 
-static SCHEMA: &'static str = include_str!("./schema.sql");
+static SCHEMA: &str = include_str!("./schema.sql");
 
 #[derive(Parser)]
 #[command(name = "dozer", about = "An indexer for MUD", version = "0.1")]
@@ -149,7 +148,7 @@ async fn reindex(args: ServerArgs) -> eyre::Result<()> {
             Err(e) => {
                 panic!("reindexing: {:?}", e);
             }
-            Ok(n) if n == 0 => {
+            Ok(0) => {
                 println!("done");
                 exit(0)
             }

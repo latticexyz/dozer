@@ -38,7 +38,7 @@ pub mod query {
         let parsed_query =
             Parser::parse_sql(PG, user_query).map_err(|e| api::Error::User(e.to_string()))?;
         let schemas = load_schemas(pgtx, address, &parsed_query).await?;
-        if schemas.len() == 0 {
+        if schemas.is_empty() {
             return Err(api::Error::User("schemas not found".to_string()));
         }
         build_sql(user_query, schemas)
@@ -56,22 +56,21 @@ pub mod query {
             table_names.insert(relname);
             ControlFlow::<()>::Continue(())
         });
-        Ok(Schema::from_pg(pgtx, address, table_names.into_iter().collect()).await?)
+        Schema::from_pg(pgtx, address, table_names.into_iter().collect()).await
     }
 
     fn build_sql(user_query: &str, schemas: Vec<Schema>) -> Result<String, api::Error> {
         let schemas = validate_sql::validate(user_query, schemas)?;
-        let mut query: Vec<String> = Vec::new();
-        query.push("with".to_string());
-        query.push(
+        let query: Vec<String> = vec![
+            "with".to_string(),
             schemas
                 .iter()
                 .sorted_by_key(|s| s.full_name())
                 .map(|s| s.cte_sql())
                 .collect::<Result<Vec<_>, _>>()?
                 .join(","),
-        );
-        query.push(user_query.to_string());
+            user_query.to_string(),
+        ];
         Ok(query.join(" "))
     }
 
@@ -435,8 +434,8 @@ impl Schema {
                 .expect("missing dynamic data for val_names"),
         );
         Ok(Schema {
-            address: address,
-            table_id: table_id,
+            address,
+            table_id,
             key_schema: data.get_static32(1),
             val_schema: data.get_static32(2),
             key_names: SolArrayOf::<sol!(string)>::abi_decode(key_names, false)
@@ -548,10 +547,10 @@ impl Schema {
     }
 
     pub fn full_name(&self) -> String {
-        if self.namespace().len() > 0 {
-            vec![self.namespace(), self.name()].join("__")
-        } else {
+        if self.namespace().is_empty() {
             self.name()
+        } else {
+            [self.namespace(), self.name()].join("__")
         }
     }
 

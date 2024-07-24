@@ -22,7 +22,7 @@ pub async fn tables(pg: &mut Client) -> Result<u64, indexer::IndexError> {
             &[],
         )
         .await?;
-    let (block_num, log_idx) = if rows.len() == 0 {
+    let (block_num, log_idx) = if rows.is_empty() {
         (U64::from(0), U64::from(0))
     } else {
         (
