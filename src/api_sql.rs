@@ -1,8 +1,12 @@
 use crate::{api, mud_schema};
 
-use alloy::{hex, primitives::Address};
+use alloy::{
+    hex,
+    primitives::{Address, Bytes},
+};
 use axum::{extract::State, Json};
 use eyre::{Context, Result};
+use itertools::Itertools;
 use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -93,6 +97,13 @@ async fn handle_single(pgtx: &Transaction<'_>, req: Request) -> Result<Rows, api
                 Type::NUMERIC_ARRAY => {
                     let nums: Vec<U256> = row.get(idx);
                     serde_json::json!(nums.iter().map(|n| n.to_string()).collect::<Vec<String>>())
+                }
+                Type::BYTEA_ARRAY => {
+                    let arrays: Vec<Vec<u8>> = row.get::<usize, Vec<Vec<u8>>>(idx);
+                    serde_json::json!(arrays
+                        .iter()
+                        .map(|array| Bytes::copy_from_slice(array))
+                        .collect_vec())
                 }
                 _ => Value::Null,
             };
