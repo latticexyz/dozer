@@ -32,7 +32,7 @@ pub fn validate(
     println!("schemas: {:?}", schemas);
     let mut validator = Validator { schemas };
     validator.validate(query)?;
-    Ok(validator.schemas.into_iter().map(|(_, v)| v).collect())
+    Ok(validator.schemas.into_values().collect())
 }
 
 impl Validator {
@@ -50,7 +50,7 @@ impl Validator {
     fn validate_query(&mut self, query: &ast::Query) -> Result<(), api::Error> {
         match query {
             ast::Query { with: Some(_), .. } => no!("with"),
-            ast::Query { locks, .. } if locks.len() > 0 => no!("for update"),
+            ast::Query { locks, .. } if !locks.is_empty() => no!("for update"),
             ast::Query { body, .. } => self.validate_query_body(body),
         }
     }
@@ -78,15 +78,15 @@ impl Validator {
             } => no!("value_table_mode"),
             ast::Select {
                 lateral_views: l, ..
-            } if l.len() > 0 => no!("lateral"),
+            } if !l.is_empty() => no!("lateral"),
             ast::Select {
                 distribute_by: d, ..
-            } if d.len() > 0 => no!("distribute_by"),
-            ast::Select { cluster_by: d, .. } if d.len() > 0 => no!("cluster_by"),
+            } if !d.is_empty() => no!("distribute_by"),
+            ast::Select { cluster_by: d, .. } if !d.is_empty() => no!("cluster_by"),
             ast::Select {
                 named_window: w, ..
-            } if w.len() > 0 => no!("named_window"),
-            ast::Select { from, .. } if from.len() == 0 => no!("empty tables"),
+            } if !w.is_empty() => no!("named_window"),
+            ast::Select { from, .. } if from.is_empty() => no!("empty tables"),
             ast::Select {
                 distinct,
                 projection,
@@ -97,13 +97,13 @@ impl Validator {
                 ..
             } => {
                 if let Some(ast::Distinct::On(exprs)) = distinct {
-                    self.validate_expressions(&exprs)?;
+                    self.validate_expressions(exprs)?;
                 }
                 if let Some(expr) = selection {
-                    self.validate_expression(&expr)?;
+                    self.validate_expression(expr)?;
                 }
                 if let ast::GroupByExpr::Expressions(exprs) = group_by {
-                    self.validate_expressions(&exprs)?;
+                    self.validate_expressions(exprs)?;
                 }
                 for projection_item in projection.iter() {
                     match projection_item {
@@ -117,9 +117,9 @@ impl Validator {
                         }
                     }?;
                 }
-                self.validate_expressions(&sort_by)?;
+                self.validate_expressions(sort_by)?;
                 for table_with_join in from {
-                    self.validate_table(&table_with_join)?;
+                    self.validate_table(table_with_join)?;
                 }
                 Ok(())
             }
@@ -163,7 +163,7 @@ impl Validator {
         }
     }
 
-    fn validate_compound_column(&mut self, id: &Vec<ast::Ident>) -> Result<(), api::Error> {
+    fn validate_compound_column(&mut self, id: &[ast::Ident]) -> Result<(), api::Error> {
         let (table_name, col_name) = match id.len() {
             3 => (id[0..2].iter().join("."), id[2].to_string()),
             2 => (id[0].to_string(), id[1].to_string()),
@@ -180,21 +180,19 @@ impl Validator {
                     schema
                         .select_list
                         .as_mut()
-                        .and_then(|sl| Some(sl.insert(col_name)));
+                        .map(|sl| Some(sl.insert(col_name)));
                     Ok(())
                 } else {
-                    return Err(api::Error::User(format!(
+                    Err(api::Error::User(format!(
                         "column {} not defined in table {}",
                         col_name, table_name,
-                    )));
+                    )))
                 }
             }
-            None => {
-                return Err(api::Error::User(format!(
-                    "table {} not defined in query",
-                    table_name
-                )))
-            }
+            None => Err(api::Error::User(format!(
+                "table {} not defined in query",
+                table_name
+            ))),
         }
     }
 
@@ -211,7 +209,7 @@ impl Validator {
                     schema
                         .select_list
                         .as_mut()
-                        .and_then(|sl| Some(sl.insert(id.value.to_string())));
+                        .map(|sl| Some(sl.insert(id.value.to_string())));
                 }
                 Ok(())
             }
@@ -220,17 +218,15 @@ impl Validator {
                 id.value,
                 self.schemas.values().map(|s| s.full_name()).join(","),
             ))),
-            _ => {
-                return Err(api::Error::User(format!(
-                    "{} references more than one table: {}",
-                    id.value,
-                    matched_schemas
-                        .iter()
-                        .map(|s| s.full_name())
-                        .sorted()
-                        .join(","),
-                )))
-            }
+            _ => Err(api::Error::User(format!(
+                "{} references more than one table: {}",
+                id.value,
+                matched_schemas
+                    .iter()
+                    .map(|s| s.full_name())
+                    .sorted()
+                    .join(","),
+            ))),
         }
     }
 
@@ -239,7 +235,7 @@ impl Validator {
             return no!("joins");
         }
         match &tbl_with_joins.relation {
-            ast::TableFactor::Table { with_hints: h, .. } if h.len() > 0 => no!("with_hints"),
+            ast::TableFactor::Table { with_hints: h, .. } if !h.is_empty() => no!("with_hints"),
             ast::TableFactor::Table { args: Some(_), .. } => no!("args"),
             ast::TableFactor::Table {
                 version: Some(_), ..
@@ -266,7 +262,7 @@ impl Validator {
                         name_parts[0],
                     )));
                 }
-                return Ok(());
+                Ok(())
             }
             _ => no!(tbl_with_joins.relation),
         }
@@ -287,7 +283,7 @@ mod tests {
                     panic!("query: {}\n wanted error got none", query)
                 }
                 Err(api::Error::User(e)) => {
-                    if e.to_string() != msg {
+                    if e != msg {
                         panic!("query: {}\n unkown want: {:?} got: {:?}", query, msg, e);
                     }
                 }
@@ -324,7 +320,7 @@ mod tests {
             .select_list
             .as_ref()
             .expect("no select list")
-            .into_iter()
+            .iter()
             .collect_vec();
         assert_eq!(select_list, vec!["c"]);
     }

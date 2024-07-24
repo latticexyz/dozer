@@ -54,7 +54,7 @@ pub async fn handle(
 }
 
 async fn handle_single(pgtx: &Transaction<'_>, req: Request) -> Result<Rows, api::Error> {
-    let query = mud_schema::query::enhance(&pgtx, req.address, &req.query).await?;
+    let query = mud_schema::query::enhance(pgtx, req.address, &req.query).await?;
     let rows = pgtx
         .query(&query, &[])
         .await
@@ -125,7 +125,7 @@ pub mod cli {
     use std::io::Write;
     use url::Url;
 
-    pub const HELP: &'static str = include_str!("./cli-help/query.txt");
+    pub const HELP: &str = include_str!("./cli-help/query.txt");
 
     #[derive(Args, Debug)]
     pub struct Request {
@@ -149,8 +149,7 @@ pub mod cli {
 
         let mut req_path = args.url.clone();
         req_path.set_path("/q");
-        let res =
-            client_post::<super::Response, _>(&http_client, req_path, &vec![req_body]).await?;
+        let res = client_post::<super::Response, _>(http_client, req_path, &vec![req_body]).await?;
         let rows = res.result.first().expect("no rows returned");
 
         if args.block_height {

@@ -89,7 +89,7 @@ pub async fn handle(
         .query(&query.to_sql(), params)
         .await?
         .iter()
-        .map(|r| Log::from_row(r))
+        .map(Log::from_row)
         .collect::<Result<Vec<Log>, _>>()?
         .into_iter()
         .sorted_by_key(|l| (l.block_num, l.log_idx))
@@ -143,7 +143,7 @@ impl LogsQuery {
             query.params.push(Box::new(input.address))
         }
         if let Some(mut filters) = input.filters {
-            if filters.len() > 0 {
+            if !filters.is_empty() {
                 filters.push(LogsRequestFilter {
                     table_id: Some(fixed_bytes!(
                         "746273746f72650000000000000000005461626c657300000000000000000000"
@@ -171,11 +171,8 @@ impl LogsQuery {
     fn add_filter_field(&mut self, field: &str, param: Box<Param>) {
         self.params.push(param);
         self.num_params += 1;
-        self.and_predicates.push(String::from(&format!(
-            "{} = ${}",
-            field,
-            self.num_params.to_string()
-        )));
+        self.and_predicates
+            .push(String::from(&format!("{} = ${}", field, self.num_params)));
     }
 
     fn add_filter(&mut self) {
@@ -185,7 +182,7 @@ impl LogsQuery {
     }
 
     fn filters_sql(&self) -> String {
-        if self.or_predicates.len() > 0 {
+        if !self.or_predicates.is_empty() {
             format!("and ({})", self.or_predicates.join(" or "))
         } else {
             "".to_string()

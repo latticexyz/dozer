@@ -8,7 +8,7 @@ pub struct Data<'a> {
 }
 
 fn dec(s: &[u8]) -> usize {
-    s.into_iter().fold(0, |n, b| n << 8 | *b as usize)
+    s.iter().fold(0, |n, b| n << 8 | *b as usize)
 }
 
 impl<'a> Data<'a> {
@@ -114,11 +114,13 @@ mod pl_pgsql_test {
     use postgresql_embedded::{PostgreSQL, Settings, Version};
     use tokio_postgres::{Client, NoTls};
 
-    static SCHEMA: &'static str = include_str!("./schema.sql");
+    static SCHEMA: &str = include_str!("./schema.sql");
 
     async fn test_pg() -> (PostgreSQL, Client) {
-        let mut pg_settings = Settings::default();
-        pg_settings.version = Version::new(16, Some(2), Some(3));
+        let pg_settings = Settings {
+            version: Version::new(16, Some(2), Some(3)),
+            ..Default::default()
+        };
         let mut db = PostgreSQL::new(pg_settings);
         db.setup().await.expect("setting up pg");
         db.start().await.expect("starting pg");

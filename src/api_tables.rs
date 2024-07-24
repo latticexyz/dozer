@@ -91,7 +91,7 @@ pub mod cli {
 
     use crate::{api::client_post, mud_schema};
 
-    pub const HELP: &'static str = include_str!("./cli-help/table.txt");
+    pub const HELP: &str = include_str!("./cli-help/table.txt");
 
     #[derive(Args, Debug)]
     pub struct Request {
@@ -120,7 +120,7 @@ pub mod cli {
         req_path.set_path("/tables");
 
         let res =
-            client_post::<Vec<mud_schema::Schema>, _>(&http_client, req_path, &req_body).await?;
+            client_post::<Vec<mud_schema::Schema>, _>(http_client, req_path, &req_body).await?;
         let mut tw = tabwriter::TabWriter::new(std::io::stdout());
         res.iter().for_each(|s| {
             writeln!(tw, "{}\r", s.description()).expect("unable to write to stdout")
