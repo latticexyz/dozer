@@ -267,6 +267,9 @@ mod field {
                             pos, size, name
                         )
                     }
+                    Static::Bytea(_, Desc::Bool) => {
+                        format!("get_byte(static_data, {}) = 1 as {}", pos, name)
+                    }
                     Static::Bytea(size, _) => {
                         format!("sdec(static_data, {}, {}) as {}", pos, size, name)
                     }
