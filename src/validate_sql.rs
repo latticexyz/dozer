@@ -29,7 +29,6 @@ pub fn validate(
             (s.full_name(), s)
         })
         .collect();
-    println!("schemas: {:?}", schemas);
     let mut validator = Validator { schemas };
     validator.validate(query)?;
     Ok(validator.schemas.into_values().collect())
@@ -112,7 +111,6 @@ impl Validator {
                             self.validate_expression(expr)
                         }
                         _ => {
-                            println!("projection: {:?}", projection_item);
                             no!(projection_item)
                         }
                     }?;
