@@ -225,3 +225,21 @@ The backup routine will run whenever dozer is running unless the `no-backup` fla
 The backup routine will be triggered from within dozer every 60s.
 
 There is also a `backup` sub-command if you want to trigger a backup without running a dozer server. See `dozer backup --help` for more details.
+
+## Restore
+
+Restore will download a backup from S3, create a dozer database on localhost, and restore the backup.
+
+If a database (specified by `--pg-url`) already exists then `restore` will exit with error after downloading the backup from S3.
+
+**Operator must ensure that `dozer server` is not running concurrently with `dozer server`.**
+
+Restore from a sepcific S3 key
+```
+dozer restore --pg-url postgres://localhost/dozer dozer-backup-$unix_timestamp
+```
+
+Restore from the latest backup in S3
+```
+dozer restore --pg-url postgres://localhost/dozer
+```

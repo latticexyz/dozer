@@ -12,10 +12,13 @@ use aws_sdk_s3::{
     Client,
 };
 use clap::Parser;
-use eyre::Result;
+use eyre::{eyre, OptionExt, Result};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use tokio::fs;
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
+};
 
 #[derive(Parser)]
 pub struct Args {
@@ -27,8 +30,62 @@ pub struct Args {
 
     #[clap(long = "backup-window", default_value = "1 day")]
     window: humantime::Duration,
+
+    key: Option<String>,
 }
 
+#[tracing::instrument(skip_all, fields(id))]
+pub async fn restore(pg_url: &str, args: &Args) -> eyre::Result<()> {
+    let config: tokio_postgres::Config = pg_url.parse().expect("unable to parse pg_url");
+    let db_name = config.get_dbname().expect("unable to parse dbname");
+    let s3 = aws_sdk_s3::Client::new(&aws_config::load_defaults(BehaviorVersion::latest()).await);
+    let id = if let Some(key) = &args.key {
+        from_filename(key).ok_or(eyre!("unable to find backup id for: {}", key))?
+    } else {
+        remote_backups(&s3, &args.bucket)
+            .await?
+            .into_iter()
+            .last()
+            .ok_or(eyre!("no backups in remote"))?
+    };
+    tracing::Span::current().record("id", id);
+    let resp = s3
+        .get_object()
+        .bucket(&args.bucket)
+        .key(to_filename(id))
+        .send()
+        .await?;
+    let mut file = File::create(Path::new(&args.dir).join(to_filename(id))).await?;
+    let mut body = resp.body;
+    while let Some(data) = body.next().await {
+        file.write_all(&(data?)).await?;
+    }
+    tracing::info!("creating database: {}", db_name);
+    std::process::Command::new("createdb")
+        .arg(db_name)
+        .stdout(Stdio::piped())
+        .spawn()?
+        .wait_with_output()?
+        .status
+        .success()
+        .then(|| tracing::info!("created db"))
+        .ok_or_eyre("unable to createdb")?;
+    tracing::info!("restoring database: {}", db_name);
+    std::process::Command::new("pg_restore")
+        .arg("-d")
+        .arg(db_name)
+        .arg(Path::new(&args.dir).join(to_filename(id)))
+        .stdout(Stdio::piped())
+        .spawn()?
+        .wait_with_output()?
+        .status
+        .success()
+        .then(|| tracing::info!("restored db"))
+        .ok_or_eyre("unable to pg_restore")?;
+    Ok(())
+}
+
+#[tracing::instrument(skip_all)]
 pub async fn run(pg_url: &str, args: &Args) -> eyre::Result<()> {
     let s3 = aws_sdk_s3::Client::new(&aws_config::load_defaults(BehaviorVersion::latest()).await);
 
@@ -100,7 +157,11 @@ fn pgdump(database_url: &str) -> Result<u64> {
         .arg(to_filename(id))
         .stdout(Stdio::piped())
         .spawn()?
-        .wait_with_output()?;
+        .wait_with_output()?
+        .status
+        .success()
+        .then(|| tracing::info!("dumped db"))
+        .ok_or_eyre("unable to pg_dump")?;
     Ok(id)
 }
 
