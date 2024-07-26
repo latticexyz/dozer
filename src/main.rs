@@ -83,6 +83,8 @@ struct ServerArgs {
 enum Commands {
     #[command(name = "backup", about = "Pg_dump then upload to s3")]
     Backup(ServerArgs),
+    #[command(name = "restore", about = "Download from s3 and then pg_restore")]
+    Restore(ServerArgs),
     #[command(name = "re-index", about = "Re-index MUD schemas using records table")]
     Reindex(ServerArgs),
     #[command(name = "server", about = "Start indexing and serving API requests")]
@@ -114,6 +116,7 @@ async fn main() -> eyre::Result<()> {
 
     match args.command {
         Some(Commands::Backup(args)) => backup::run(&args.pg_url, &args.backup).await,
+        Some(Commands::Restore(args)) => backup::restore(&args.pg_url, &args.backup).await,
         Some(Commands::Table(args)) => api_tables::cli::request(&http_client, args).await,
         Some(Commands::Query(args)) => api_sql::cli::request(&http_client, args).await,
         Some(Commands::Server(args)) => server(args).await,
@@ -183,6 +186,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
 
     let eth_client = ProviderBuilder::new().on_http(args.eth_url);
     {
+        w_pg.query("select pg_advisory_lock(2)", &[]).await?;
         w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
         indexer::init_blocks(&mut w_pg, &eth_client, args.index_start.unwrap_or(0)).await?;
     }
