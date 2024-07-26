@@ -88,12 +88,16 @@ struct NextRange {
     to: NumHash,
 }
 
-pub async fn init_blocks<F: EthApi>(pg: &mut Client, remote: &F, start: u64) -> eyre::Result<()> {
+pub async fn init_blocks<F: EthApi>(
+    pgtx: &Transaction<'_>,
+    remote: &F,
+    start: u64,
+) -> eyre::Result<()> {
     let block = remote
         .block(BlockNumberOrTag::Number(start))
         .await
         .map_err(|e| eyre!("getting block: {:?}", e))?;
-    pg.execute(
+    pgtx.execute(
         "
         insert into blocks(num, hash)
         values ($1, $2) on conflict(num) do nothing
