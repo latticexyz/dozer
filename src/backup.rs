@@ -105,14 +105,14 @@ pub async fn run(pg_url: &str, args: &Args) -> eyre::Result<()> {
     match local.into_iter().last() {
         Some(last) if now() - last > args.window.as_secs() => {
             tracing::info!("local backup needed. last: {}", since(last));
-            pgdump(pg_url)?;
+            pgdump(&args.dir, pg_url)?;
         }
         Some(last) => {
             tracing::info!("local backup up to date. last: {}", since(last))
         }
         None => {
             tracing::info!("no local backups");
-            pgdump(pg_url)?;
+            pgdump(&args.dir, pg_url)?;
         }
     };
     let last_local = local_backups(&args.dir)
@@ -153,7 +153,7 @@ pub async fn run(pg_url: &str, args: &Args) -> eyre::Result<()> {
 }
 
 #[tracing::instrument(skip_all, fields(id))]
-fn pgdump(database_url: &str) -> Result<u64> {
+fn pgdump(dir: &str, database_url: &str) -> Result<u64> {
     let id = now();
     tracing::Span::current().record("id", id);
     tracing::info!("starting pg_dump");
@@ -162,7 +162,7 @@ fn pgdump(database_url: &str) -> Result<u64> {
         .arg("-F")
         .arg("c")
         .arg("-f")
-        .arg(to_filename(id))
+        .arg(Path::new(dir).join(to_filename(id)))
         .stdout(Stdio::piped())
         .spawn()?
         .wait_with_output()?
