@@ -259,9 +259,9 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             tokio::time::sleep(Duration::from_secs(10)).await;
             if let Err(e) = backup::run(&args.pg_url, &args.backup).await {
                 if let Some(src) = e.source() {
-                    tracing::error!(error = %e, source = %src);
+                    tracing::error!(cmd = "backup", error = %e, source = %src);
                 } else {
-                    tracing::error!(error = %e);
+                    tracing::error!(cmd = "backup", error = %e);
                 }
             }
         }
