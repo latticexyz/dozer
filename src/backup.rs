@@ -5,14 +5,9 @@ use std::{
 };
 
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::{
-    error::SdkError,
-    operation::put_object::{PutObjectError, PutObjectOutput},
-    primitives::ByteStream,
-    Client,
-};
+use aws_sdk_s3::{primitives::ByteStream, Client};
 use clap::Parser;
-use eyre::{eyre, OptionExt, Result};
+use eyre::{eyre, Context, OptionExt, Result};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
 use tokio::{
@@ -22,10 +17,14 @@ use tokio::{
 
 #[derive(Parser)]
 pub struct Args {
-    #[clap(long = "backup-bucket", env = "DOZER_BACKUP_BUCKET")]
+    #[clap(
+        long = "backup-bucket",
+        env = "DOZER_BACKUP_BUCKET",
+        default_value = "lattice-dozer-backups"
+    )]
     bucket: String,
 
-    #[clap(long = "backup-dir", env = "DOZER_BACKUP_DIR")]
+    #[clap(long = "backup-dir", env = "DOZER_BACKUP_DIR", default_value = ".")]
     dir: String,
 
     #[clap(long = "backup-window", default_value = "1 day")]
@@ -100,7 +99,10 @@ pub async fn run(pg_url: &str, args: &Args) -> eyre::Result<()> {
     });
     pg.query("select pg_advisory_lock(2)", &[]).await?;
 
-    match local_backups(&args.dir).await?.into_iter().last() {
+    let local = local_backups(&args.dir)
+        .await
+        .wrap_err("loading local backups")?;
+    match local.into_iter().last() {
         Some(last) if now() - last > args.window.as_secs() => {
             tracing::info!("local backup needed. last: {}", since(last));
             pgdump(pg_url)?;
@@ -114,11 +116,15 @@ pub async fn run(pg_url: &str, args: &Args) -> eyre::Result<()> {
         }
     };
     let last_local = local_backups(&args.dir)
-        .await?
+        .await
+        .wrap_err("loading last local backup")?
         .into_iter()
         .last()
         .expect("missing local backup");
-    match remote_backups(&s3, &args.bucket).await?.into_iter().last() {
+    let remote = remote_backups(&s3, &args.bucket)
+        .await
+        .wrap_err("loading remote backups")?;
+    match remote.into_iter().last() {
         Some(last_remote) if last_local > last_remote => {
             tracing::info!("remote is behind local");
             upload_backup(
@@ -126,7 +132,8 @@ pub async fn run(pg_url: &str, args: &Args) -> eyre::Result<()> {
                 &args.bucket,
                 &Path::new(&args.dir).join(to_filename(last_local)),
             )
-            .await?;
+            .await
+            .wrap_err("uplading backup")?;
         }
         Some(last) => {
             tracing::info!("remote backup is up to date. last: {}", since(last))
@@ -138,7 +145,8 @@ pub async fn run(pg_url: &str, args: &Args) -> eyre::Result<()> {
                 &args.bucket,
                 &Path::new(&args.dir).join(to_filename(last_local)),
             )
-            .await?;
+            .await
+            .wrap_err("uploading backup")?;
         }
     }
     local_cleanup(&args.dir).await
@@ -223,13 +231,19 @@ async fn remote_backups(client: &Client, bucket: &str) -> Result<Vec<u64>> {
         .bucket(bucket)
         .into_paginator()
         .send();
-    while let Some(result) = response.next().await {
-        for object in result?.contents() {
-            let key = object.key().expect("missing key");
-            if let Some(id) = from_filename(key) {
-                res.push(id)
+    loop {
+        let part = response.next().await;
+        match part {
+            None => break,
+            Some(part) => {
+                for object in part.wrap_err("unable to read part")?.contents() {
+                    let key = object.key().expect("missing key");
+                    if let Some(id) = from_filename(key) {
+                        res.push(id)
+                    }
+                }
             }
-        }
+        };
     }
     res.sort();
     Ok(res)
@@ -240,7 +254,7 @@ pub async fn upload_backup(
     client: &aws_sdk_s3::Client,
     bucket_name: &str,
     file: &Path,
-) -> Result<PutObjectOutput, SdkError<PutObjectError>> {
+) -> Result<()> {
     let id = file
         .file_name()
         .expect("unable to get file name from path")
@@ -258,6 +272,8 @@ pub async fn upload_backup(
         )
         .send()
         .await
+        .wrap_err("unable to upload backup")?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -186,9 +186,16 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
 
     let eth_client = ProviderBuilder::new().on_http(args.eth_url);
     {
-        w_pg.query("select pg_advisory_lock(2)", &[]).await?;
-        w_pg.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
-        indexer::init_blocks(&mut w_pg, &eth_client, args.index_start.unwrap_or(0)).await?;
+        let pgtx = w_pg
+            .transaction()
+            .await
+            .wrap_err("unable to start schema pgtx")?;
+        pgtx.query("select pg_advisory_xact_lock(2)", &[]).await?;
+        pgtx.batch_execute(SCHEMA).await.wrap_err("exec schema")?;
+        indexer::init_blocks(&pgtx, &eth_client, args.index_start.unwrap_or(0)).await?;
+        pgtx.commit()
+            .await
+            .wrap_err("unable to commit schema pg tx")?;
     }
 
     let config = api::Config {
@@ -249,9 +256,13 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             return;
         }
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
             if let Err(e) = backup::run(&args.pg_url, &args.backup).await {
-                tracing::error!(error = %e);
+                if let Some(src) = e.source() {
+                    tracing::error!(error = %e, source = %src);
+                } else {
+                    tracing::error!(error = %e);
+                }
             }
         }
     });
