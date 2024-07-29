@@ -207,7 +207,7 @@ impl Validator {
                     schema
                         .select_list
                         .as_mut()
-                        .map(|sl| Some(sl.insert(id.value.to_string())));
+                        .map(|sl| Some(sl.insert(id.to_string())));
                 }
                 Ok(())
             }
@@ -332,8 +332,13 @@ mod tests {
                 None,
             ),
             (
+                vec![test_schema("foo", vec!["c"])],
+                r#"select "c" from foo"#,
+                None,
+            ),
+            (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
-                "select foo.c, bar.c from foo, bar",
+                r#"select foo.c, bar."c" from foo, bar where foo."c" = bar.c"#,
                 None,
             ),
             (
@@ -344,6 +349,11 @@ mod tests {
             (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
                 "select foo.c, bar.c from foo, bar where foo.c = bar.c",
+                None,
+            ),
+            (
+                vec![test_schema("foo", vec!["exists"])],
+                "select \"exists\" from foo",
                 None,
             ),
         ]
