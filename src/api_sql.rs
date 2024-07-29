@@ -56,7 +56,7 @@ pub async fn handle(
 async fn handle_single(pgtx: &Transaction<'_>, req: Request) -> Result<Rows, api::Error> {
     let query = mud_schema::query::enhance(pgtx, req.address, &req.query).await?;
     let rows = pgtx
-        .query(&query, &[])
+        .query(&dbg!(query), &[])
         .await
         .wrap_err("querying records table")?;
 
