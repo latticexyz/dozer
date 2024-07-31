@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::api;
 
@@ -93,6 +93,7 @@ pub mod query {
                 &user_query,
                 vec![
                     Schema {
+                        query_name: None,
                         address: fixed_bytes!(),
                         table_id: fixed_bytes!(
                             "00000000000000000000000000000000666f6f00000000000000000000000000"
@@ -106,6 +107,7 @@ pub mod query {
                         select_list: None,
                     },
                     Schema {
+                        query_name: None,
                         address: fixed_bytes!(),
                         table_id: fixed_bytes!(
                             "0000000000000000000000000000000062617200000000000000000000000000"
@@ -375,7 +377,7 @@ mod field {
     }
 }
 
-fn encode_resource_id(name: &str) -> Result<FixedBytes<30>, api::Error> {
+fn encode_resource_id(name: &str) -> FixedBytes<30> {
     let name = name.strip_prefix("__").unwrap_or(name);
     let (mut id, parts) = (FixedBytes::<30>::ZERO, name.split("__").collect_vec());
     match parts.len() {
@@ -383,7 +385,7 @@ fn encode_resource_id(name: &str) -> Result<FixedBytes<30>, api::Error> {
             let mut name = parts[0].as_bytes().to_vec();
             name.resize(16, 0x00);
             id[14..].copy_from_slice(&name[..]);
-            Ok(id)
+            id
         }
         2 => {
             let mut ns = parts[0].as_bytes().to_vec();
@@ -392,12 +394,9 @@ fn encode_resource_id(name: &str) -> Result<FixedBytes<30>, api::Error> {
             let mut name = parts[1].as_bytes().to_vec();
             name.resize(16, 0x00);
             id[14..].copy_from_slice(&name[..]);
-            Ok(id)
+            id
         }
-        _ => Err(api::Error::User(format!(
-            "unable to parse table name: {}",
-            name
-        ))),
+        _ => panic!("unable to parse table name: {}", name),
     }
 }
 
@@ -412,6 +411,7 @@ pub struct Schema {
 
     #[serde(skip_serializing, skip_deserializing)]
     pub select_list: Option<HashSet<String>>,
+    pub query_name: Option<String>,
 }
 
 impl Schema {
@@ -446,6 +446,7 @@ impl Schema {
                 })
                 .unwrap_or_default(),
             select_list: None,
+            query_name: None,
         })
     }
 
@@ -458,6 +459,7 @@ impl Schema {
             val_names: row.try_get("val_names")?,
             val_schema: row.try_get("val_schema")?,
             select_list: None,
+            query_name: None,
         })
     }
 
@@ -467,24 +469,29 @@ impl Schema {
         address: Address,
         tables: Vec<String>,
     ) -> Result<Vec<Self>, api::Error> {
-        let ids = tables
-            .iter()
-            .map(|name| encode_resource_id(name))
-            .collect::<Result<Vec<FixedBytes<30>>, _>>()?;
-        let res = pgtx
+        let idmap: HashMap<FixedBytes<30>, String> = tables
+            .into_iter()
+            .map(|name| (encode_resource_id(&name), name))
+            .collect();
+        let mut res = pgtx
             .query(
                 r#"
                 select address, id, key_names, key_schema, val_names, val_schema
                 from tables
                 where address = $1
                 and substring(id from 3 for 30) = any($2)
-            "#,
-                &[&address.0, &ids],
+                "#,
+                &[&address.0, &idmap.keys().collect_vec()],
             )
             .await?
             .iter()
             .map(Schema::from_row)
             .collect::<Result<Vec<Schema>, _>>()?;
+        res.iter_mut().for_each(|schema| {
+            schema.query_name = idmap
+                .get(&schema.table_id[2..])
+                .map(|name| name.to_string())
+        });
         Ok(res)
     }
 
@@ -568,9 +575,13 @@ impl Schema {
     }
 
     fn name(&self) -> String {
-        String::from_utf8(self.table_id[15..32].to_vec())
-            .expect("unable to utf8 decode table name")
-            .replace('\0', "")
+        if let Some(name) = &self.query_name {
+            name.to_string()
+        } else {
+            String::from_utf8(self.table_id[15..32].to_vec())
+                .expect("unable to utf8 decode table name")
+                .replace('\0', "")
+        }
     }
 
     fn num_static(&self) -> usize {
@@ -630,6 +641,7 @@ mod schema_tests {
     #[test]
     fn test_get_col_sql() {
         let schema = &Schema {
+            query_name: None,
             address: fixed_bytes!(),
             table_id: fixed_bytes!(),
             key_names: vec![],
