@@ -1,4 +1,4 @@
-use crate::{api, mud_schema};
+use crate::{api, mud_schema, s256};
 
 use alloy::{
     hex,
@@ -79,8 +79,8 @@ async fn handle_single(pgtx: &Transaction<'_>, req: Request) -> Result<Rows, api
                     Value::Bool(b)
                 }
                 Type::NUMERIC => {
-                    let n: U256 = row.get(idx);
-                    Value::String(n.to_string())
+                    let s: s256::Int = row.get(idx);
+                    Value::String(s.to_string())
                 }
                 Type::INT2 | Type::INT4 | Type::INT8 => {
                     let n: i64 = row.get(idx);
