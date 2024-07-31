@@ -260,12 +260,6 @@ mod field {
                     Static::Num(size, _) => {
                         format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
                     }
-                    Static::Bytea(size, Desc::Address) => {
-                        format!(
-                            "substring(sdec(static_data, {}, {}) from 13 for 20) as {}",
-                            pos, size, name
-                        )
-                    }
                     Static::Bytea(_, Desc::Bool) => {
                         format!("get_byte(static_data, {}) = 1 as {}", pos, name)
                     }
