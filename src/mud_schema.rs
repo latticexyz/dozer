@@ -257,6 +257,9 @@ mod field {
         pub fn val_sql(&self, pos: usize, name: &str) -> String {
             match self {
                 Kind::Static(t) => match t {
+                    Static::Num(size, Desc::Int) => {
+                        format!("b2sn(sdec(static_data, {}, {})) as {}", pos, size, name)
+                    }
                     Static::Num(size, _) => {
                         format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
                     }
