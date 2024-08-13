@@ -560,6 +560,11 @@ impl Schema {
         self.val_names.iter().position(|n| *n == unquoted)
     }
 
+    pub fn has_name(&self, name: &str) -> bool {
+        let name = name.split("__").last().unwrap();
+        name.chars().take(16).collect::<String>() == self.name()
+    }
+
     pub fn full_name(&self) -> String {
         if self.namespace().is_empty() {
             self.name()
@@ -575,13 +580,9 @@ impl Schema {
     }
 
     fn name(&self) -> String {
-        if let Some(name) = &self.query_name {
-            name.to_string()
-        } else {
-            String::from_utf8(self.table_id[15..32].to_vec())
-                .expect("unable to utf8 decode table name")
-                .replace('\0', "")
-        }
+        String::from_utf8(self.table_id[15..32].to_vec())
+            .expect("unable to utf8 decode table name")
+            .replace('\0', "")
     }
 
     fn num_static(&self) -> usize {
