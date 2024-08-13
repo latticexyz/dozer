@@ -249,7 +249,7 @@ impl Validator {
                     )));
                 }
                 let name = name_parts[0].value.to_string();
-                if !self.schemas.values().any(|s| s.full_name() == name) {
+                if !self.schemas.values().any(|s| s.has_name(&name)) {
                     return Err(api::Error::User(format!(
                         "no schema found for table: {}",
                         name_parts[0],
