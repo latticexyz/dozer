@@ -292,7 +292,7 @@ pub async fn index<T: EthApi>(
     remote: &T,
     pg: &mut Client,
     batch_size: u64,
-) -> eyre::Result<(), IndexError> {
+) -> eyre::Result<u64, IndexError> {
     let pgtx = pg.transaction().await.wrap_err("opening index tx")?;
     let next = next_to_index(&pgtx, remote, batch_size, 100).await?;
     pgtx.commit().await.wrap_err("unable to commit tx")?;
@@ -356,7 +356,7 @@ pub async fn index<T: EthApi>(
         .record("to", next.to.num)
         .record("updates", updates_count)
         .record("records", records_count);
-    Ok(())
+    Ok(next.to.num)
 }
 
 #[tracing::instrument(fields(id, block_num, log_idx), skip_all)]
