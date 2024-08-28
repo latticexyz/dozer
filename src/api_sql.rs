@@ -10,7 +10,7 @@ use itertools::Itertools;
 use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio_postgres::{types::Type, Transaction};
+use tokio_postgres::types::Type;
 
 type Row = Vec<Value>;
 type Rows = Vec<Row>;
@@ -41,7 +41,8 @@ pub async fn handle(
         .wrap_err("starting sql api read tx")?;
     let mut res: Vec<Rows> = Vec::new();
     for r in req {
-        res.push(handle_single(&pgtx, r).await?)
+        let query = mud_schema::query::enhance(&pgtx, r.address, &r.query).await?;
+        res.push(handle_rows(pgtx.query(&dbg!(query), &[]).await?)?);
     }
     Ok(Json(Response {
         block_height: pgtx
@@ -53,13 +54,7 @@ pub async fn handle(
     }))
 }
 
-async fn handle_single(pgtx: &Transaction<'_>, req: Request) -> Result<Rows, api::Error> {
-    let query = mud_schema::query::enhance(pgtx, req.address, &req.query).await?;
-    let rows = pgtx
-        .query(&dbg!(query), &[])
-        .await
-        .wrap_err("querying records table")?;
-
+fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
     let mut result: Rows = Vec::new();
     if let Some(first) = rows.first() {
         result.push(
