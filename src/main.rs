@@ -200,6 +200,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
     }
 
     let config = api::Config {
+        broadcaster: api::Broadcaster::new(),
         pool: api_ro_pg(&args.pg_url, &args.ro_password.unwrap_or_default()),
     };
 
@@ -241,6 +242,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             .route("/", get(|| async { "hello\n" }))
             .route("/metrics", get(move || ready(prom_handler.render())))
             .route("/q", post(api_sql::handle))
+            .route("/q-live", get(api_sql::handle_sse))
             .route("/tables", post(api_tables::handle))
             .route("/api/logs", get(api_logs::handle))
             .layer(service)
@@ -282,7 +284,10 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
         let mut batch_size = args.batch_size;
         loop {
             match indexer::index(&eth_client, &mut w_pg, batch_size).await {
-                Ok(_) => batch_size = args.batch_size,
+                Ok(last) => {
+                    config.broadcaster.broadcast(last);
+                    batch_size = args.batch_size
+                }
                 Err(indexer::IndexError::NothingNew(n)) => {
                     tracing::info!("nothing new. latest: {}", n);
                     tokio::time::sleep(Duration::from_secs(1)).await;

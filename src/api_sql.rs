@@ -1,11 +1,22 @@
+use std::convert::Infallible;
+
 use crate::{api, mud_schema, s256};
 
 use alloy::{
     hex,
     primitives::{Address, Bytes},
 };
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    response::{
+        sse::{Event, KeepAlive},
+        Sse,
+    },
+    Json,
+};
+use axum_extra::extract::Form;
 use eyre::{Context, Result};
+use futures::Stream;
 use itertools::Itertools;
 use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
@@ -15,8 +26,9 @@ use tokio_postgres::types::Type;
 type Row = Vec<Value>;
 type Rows = Vec<Row>;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Request {
+    pub block_height: Option<u64>,
     pub address: Address,
     pub query: String,
 }
@@ -25,6 +37,22 @@ pub struct Request {
 pub struct Response {
     pub block_height: u64,
     pub result: Vec<Rows>,
+}
+
+pub async fn handle_sse(
+    State(conf): State<api::Config>,
+    Form(req): Form<Request>,
+) -> axum::response::Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut req = req.clone();
+    let mut rx = conf.broadcaster.add();
+    let stream = async_stream::stream! {
+        loop {
+            let resp = handle(State(conf.clone()), api::Json(vec![req.clone()])).await.expect("unable to make request");
+            yield Ok(Event::default().json_data(resp.0).expect("unable to seralize json"));
+            req.block_height = Some(rx.recv().await.expect("unable to receive new block update"));
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 #[tracing::instrument(skip_all)]
@@ -138,6 +166,7 @@ pub mod cli {
 
     pub async fn request(http_client: &Client, args: Request) -> Result<()> {
         let req_body = super::Request {
+            block_height: None,
             address: args.address,
             query: args.query,
         };

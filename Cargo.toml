@@ -1,54 +1,61 @@
 [package]
-    edition = "2021"
-    name    = "dozer"
-    version = "0.1.0"
+edition = "2021"
+name = "dozer"
+version = "0.1.0"
 
 [dependencies]
-    alloy = { version = "0.1", features = [
-        "contract",
-        "postgres",
-        "providers",
-        "rpc-client",
-        "rpc-types-eth",
-        "serde",
-    ] }
-    async-trait = "0.1"
-    aws-config = { version = "1.5.4", features = ["behavior-version-latest"] }
-    aws-sdk-s3 = "1.42.0"
-    axum = "0.7.5"
-    clap = { version = "4.5.4", features = ["derive", "env"] }
-    deadpool-postgres = "0.14"
-    eyre = "0.6.12"
-    futures = "0.3"
-    humantime = "2.1.0"
-    itertools = "0.13"
-    metrics = "0.23"
-    metrics-exporter-prometheus = "0.15"
-    metrics-tracing-context = "0.16"
-    metrics-util = "0.17"
-    openssl = "0.10.64"
-    postgres-openssl = "0.5"
-    reqwest = { version = "0.12.4", features = ["gzip", "json"] }
-    ruint = { version = "1.12.1", features = ["postgres"] }
-    serde = { version = "1", features = ["derive"] }
-    serde_json = { version = "1" }
-    sqlparser = { version = "0.47", features = ["visitor"] }
-    tabwriter = "1.4.0"
-    tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
-    tokio-postgres = { version = "0.7.10", features = ["array-impls"] }
-    tokio-stream = "0.1"
-    tower = "0.4"
-    tower-http = { version = "0.5.0", features = [
-        "cors",
-        "compression-gzip",
-        "compression-zstd",
-        "timeout",
-        "trace",
-    ] }
-    tracing = "0.1"
-    tracing-appender = "0.2"
-    tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-    url = "2.5"
+alloy = { version = "0.1", features = [
+    "contract",
+    "postgres",
+    "providers",
+    "rpc-client",
+    "rpc-types-eth",
+    "serde",
+] }
+async-stream = "0.3.5"
+async-trait = "0.1"
+aws-config = { version = "1.5.4", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1.42.0"
+axum = "0.7.5"
+axum-extra = { version = "0.9", features = ["form"] }
+clap = { version = "4.5.4", features = ["derive", "env"] }
+deadpool-postgres = "0.14"
+eyre = "0.6.12"
+futures = "0.3"
+humantime = "2.1.0"
+itertools = "0.13"
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+metrics-tracing-context = "0.16"
+metrics-util = "0.17"
+openssl = "0.10.64"
+postgres-openssl = "0.5"
+reqwest = { version = "0.12.4", features = ["gzip", "json"] }
+ruint = { version = "1.12.1", features = ["postgres"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+sqlparser = { version = "0.47", features = ["visitor"] }
+tabwriter = "1.4.0"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "fs",
+] }
+tokio-postgres = { version = "0.7.10", features = ["array-impls"] }
+tokio-stream = "0.1"
+tower = "0.4"
+tower-http = { version = "0.5.0", features = [
+    "cors",
+    "compression-gzip",
+    "compression-zstd",
+    "timeout",
+    "trace",
+] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
 
 [dev-dependencies]
-    postgresql_embedded = "0.12"
+postgresql_embedded = "0.12"
