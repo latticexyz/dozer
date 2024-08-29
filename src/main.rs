@@ -284,8 +284,8 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
         let mut batch_size = args.batch_size;
         loop {
             match indexer::index(&eth_client, &mut w_pg, batch_size).await {
-                Ok(last) => {
-                    config.broadcaster.broadcast(last);
+                Ok(next) => {
+                    config.broadcaster.broadcast(next);
                     batch_size = args.batch_size
                 }
                 Err(indexer::IndexError::NothingNew(n)) => {
