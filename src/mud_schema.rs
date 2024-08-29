@@ -153,7 +153,7 @@ pub mod query {
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
                         and not expired
                         and not deleted
-                        and block_num > 42
+                        and block_num >= 42
                     ) select value from foo
                 "#).unwrap()
             )
@@ -618,7 +618,7 @@ impl Schema {
             );
         }
         let block_height = if let Some(h) = block_height {
-            format!("and block_num > {}", h)
+            format!("and block_num >= {}", h)
         } else {
             String::new()
         };
