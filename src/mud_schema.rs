@@ -33,6 +33,7 @@ pub mod query {
     pub async fn enhance(
         pgtx: &Transaction<'_>,
         address: Address,
+        block_height: Option<u64>,
         user_query: &str,
     ) -> Result<String, api::Error> {
         let parsed_query =
@@ -41,7 +42,7 @@ pub mod query {
         if schemas.is_empty() {
             return Err(api::Error::User("schemas not found".to_string()));
         }
-        build_sql(user_query, schemas)
+        build_sql(block_height, user_query, schemas)
     }
 
     async fn load_schemas(
@@ -59,14 +60,18 @@ pub mod query {
         Schema::from_pg(pgtx, address, table_names.into_iter().collect()).await
     }
 
-    fn build_sql(user_query: &str, schemas: Vec<Schema>) -> Result<String, api::Error> {
+    fn build_sql(
+        block_height: Option<u64>,
+        user_query: &str,
+        schemas: Vec<Schema>,
+    ) -> Result<String, api::Error> {
         let schemas = validate_sql::validate(user_query, schemas)?;
         let query: Vec<String> = vec![
             "with".to_string(),
             schemas
                 .iter()
                 .sorted_by_key(|s| s.full_name())
-                .map(|s| s.cte_sql())
+                .map(|s| s.cte_sql(block_height))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(","),
             user_query.to_string(),
@@ -77,50 +82,37 @@ pub mod query {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use alloy::primitives::fixed_bytes;
+        use crate::mud_schema::encode_resource_id;
+        use alloy::primitives::{fixed_bytes, FixedBytes};
 
         fn fmt_sql(sql: &str) -> Result<String> {
             let ast = Parser::parse_sql(PG, sql)?;
             Ok(ast[0].to_string())
         }
 
+        fn test_schema(table_name: &str, col_name: &str) -> Schema {
+            let mut table_id = FixedBytes::<32>::ZERO;
+            table_id[2..].copy_from_slice(encode_resource_id(table_name).as_slice());
+            Schema {
+                query_name: None,
+                select_list: None,
+                address: fixed_bytes!(),
+                table_id,
+                key_names: vec![],
+                val_names: vec![String::from(col_name)],
+                key_schema: fixed_bytes!(),
+                val_schema: fixed_bytes!(
+                    "0004010003000000000000000000000000000000000000000000000000000000"
+                ),
+            }
+        }
+
         #[test]
         fn test_enhance() {
-            let user_query = String::from(
-                "select foo.value, bar.value from foo,bar where foo.value = bar.value",
-            );
             let pq = build_sql(
-                &user_query,
-                vec![
-                    Schema {
-                        query_name: None,
-                        address: fixed_bytes!(),
-                        table_id: fixed_bytes!(
-                            "00000000000000000000000000000000666f6f00000000000000000000000000"
-                        ),
-                        key_names: vec![],
-                        val_names: vec![String::from("value")],
-                        key_schema: fixed_bytes!(),
-                        val_schema: fixed_bytes!(
-                            "0004010003000000000000000000000000000000000000000000000000000000"
-                        ),
-                        select_list: None,
-                    },
-                    Schema {
-                        query_name: None,
-                        address: fixed_bytes!(),
-                        table_id: fixed_bytes!(
-                            "0000000000000000000000000000000062617200000000000000000000000000"
-                        ),
-                        key_names: vec![],
-                        val_names: vec![String::from("value")],
-                        key_schema: fixed_bytes!(),
-                        val_schema: fixed_bytes!(
-                            "0004010003000000000000000000000000000000000000000000000000000000"
-                        ),
-                        select_list: None,
-                    },
-                ],
+                None,
+                "select foo.value, bar.value from foo,bar where foo.value = bar.value",
+                vec![test_schema("foo", "value"), test_schema("bar", "value")],
             );
             assert_eq!(
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
@@ -141,7 +133,30 @@ pub mod query {
                         and not deleted
                     ) select foo.value, bar.value from foo,bar where foo.value = bar.value
                 "#).unwrap()
-        )
+            )
+        }
+
+        #[test]
+        fn test_enhance_block_height() {
+            let pq = build_sql(
+                Some(42),
+                "select value from foo",
+                vec![test_schema("foo", "value")],
+            );
+            assert_eq!(
+                fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
+                fmt_sql(r#"
+                    with foo as (
+                        select b2n(sdec(static_data, 0, 4)) as value
+                        from records
+                        where address = '\x0000000000000000000000000000000000000000'
+                        and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
+                        and not expired
+                        and not deleted
+                        and block_num > 42
+                    ) select value from foo
+                "#).unwrap()
+            )
         }
     }
 }
@@ -589,7 +604,7 @@ impl Schema {
         self.val_schema[2] as usize
     }
 
-    pub fn cte_sql(&self) -> Result<String, api::Error> {
+    pub fn cte_sql(&self, block_height: Option<u64>) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
         res.push(format!("{} as (", self.full_name()));
         res.push("select".to_string());
@@ -602,10 +617,23 @@ impl Schema {
                     .join(","),
             );
         }
+        let block_height = if let Some(h) = block_height {
+            format!("and block_num > {}", h)
+        } else {
+            String::new()
+        };
         res.push(format!(
-            r#"from records where address = '\x{}' and table_id = '\x{}' and not expired and not deleted"#,
+            r#"
+            from records
+            where address = '\x{}'
+            and table_id = '\x{}'
+            and not expired
+            and not deleted
+            {}
+            "#,
             hex::encode(self.address),
             hex::encode(self.table_id),
+            block_height,
         ));
         res.push(")".to_string());
         Ok(res.join(" "))
