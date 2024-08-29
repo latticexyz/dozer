@@ -69,7 +69,7 @@ pub async fn handle(
         .wrap_err("starting sql api read tx")?;
     let mut res: Vec<Rows> = Vec::new();
     for r in req {
-        let query = mud_schema::query::enhance(&pgtx, r.address, &r.query).await?;
+        let query = mud_schema::query::enhance(&pgtx, r.address, r.block_height, &r.query).await?;
         res.push(handle_rows(pgtx.query(&dbg!(query), &[]).await?)?);
     }
     Ok(Json(Response {
