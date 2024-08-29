@@ -356,7 +356,7 @@ pub async fn index<T: EthApi>(
         .record("to", next.to.num)
         .record("updates", updates_count)
         .record("records", records_count);
-    Ok(next.to.num)
+    Ok(next.from.num)
 }
 
 #[tracing::instrument(fields(id, block_num, log_idx), skip_all)]
