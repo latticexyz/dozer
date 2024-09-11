@@ -11,6 +11,7 @@ use tokio_postgres::{types::ToSql, Row};
 #[derive(Deserialize, Debug)]
 pub struct LogsRequest {
     input: String,
+    block_num: Option<U64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -76,7 +77,7 @@ pub async fn handle(
     Query(query): Query<LogsRequest>,
 ) -> Result<Json<LogsResponse>, api::Error> {
     let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
-    let query = LogsQuery::new(req_input);
+    let query = LogsQuery::new(query.block_num, req_input);
 
     let params: &[&(dyn ToSql + Sync)] = &query
         .params
@@ -124,6 +125,7 @@ type Param = (dyn ToSql + Sync + Send);
 
 #[derive(Default, Debug)]
 struct LogsQuery {
+    min_block_num: Option<U64>,
     or_predicates: Vec<String>,
     and_predicates: Vec<String>,
     num_params: i32,
@@ -131,8 +133,9 @@ struct LogsQuery {
 }
 
 impl LogsQuery {
-    fn new(input: LogsRequestInput) -> Self {
+    fn new(min_block_num: Option<U64>, input: LogsRequestInput) -> Self {
         let mut query = LogsQuery {
+            min_block_num,
             num_params: 0,
             and_predicates: vec![],
             or_predicates: vec![],
@@ -190,6 +193,11 @@ impl LogsQuery {
     }
 
     fn to_sql(&self) -> String {
+        let block_num_predicate = if let Some(n) = self.min_block_num {
+            format!("and block_num >= {}", n)
+        } else {
+            String::new()
+        };
         format!(
             r#"
             select
@@ -208,8 +216,11 @@ impl LogsQuery {
             from records
             where not expired
             and not deleted
-            and address = $1 {}
+            and address = $1
+            {}
+            {}
             "#,
+            block_num_predicate,
             self.filters_sql()
         )
     }
@@ -229,11 +240,14 @@ mod tests {
 
     #[test]
     fn test_logs_query_empty_filters() {
-        let query = LogsQuery::new(LogsRequestInput {
-            _chain_id: Some(690),
-            address: Some(FixedBytes::<20>::with_last_byte(1)),
-            filters: Some(vec![]),
-        });
+        let query = LogsQuery::new(
+            None,
+            LogsRequestInput {
+                _chain_id: Some(690),
+                address: Some(FixedBytes::<20>::with_last_byte(1)),
+                filters: Some(vec![]),
+            },
+        );
         assert_eq!(
             fmt_sql(&query.to_sql()).expect("invalid sql"),
             fmt_sql(
@@ -262,16 +276,57 @@ mod tests {
     }
 
     #[test]
+    fn test_logs_query_min_block_num() {
+        let query = LogsQuery::new(
+            Some(U64::from(42)),
+            LogsRequestInput {
+                _chain_id: Some(690),
+                address: Some(FixedBytes::<20>::with_last_byte(1)),
+                filters: Some(vec![]),
+            },
+        );
+        assert_eq!(
+            fmt_sql(&query.to_sql()).expect("invalid sql"),
+            fmt_sql(
+                r#"
+                select
+                    block_num,
+                    log_idx,
+                    address,
+                    table_id,
+                    key,
+                    static_data,
+                    CASE
+                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                        THEN '\x00'::bytea
+                        ELSE encoded_lengths
+                    END AS encoded_lengths,
+                    dynamic_data
+                from records
+                where not expired
+                and not deleted
+                and address = $1
+                and block_num >= 42
+                "#
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn test_logs_query() {
-        let query = LogsQuery::new(LogsRequestInput {
-            _chain_id: Some(690),
-            address: Some(FixedBytes::<20>::with_last_byte(1)),
-            filters: Some(vec![LogsRequestFilter {
-                table_id: Some(FixedBytes::<32>::with_last_byte(1)),
-                key0: Some(FixedBytes::<32>::with_last_byte(1)),
-                key1: Some(FixedBytes::<32>::with_last_byte(1)),
-            }]),
-        });
+        let query = LogsQuery::new(
+            None,
+            LogsRequestInput {
+                _chain_id: Some(690),
+                address: Some(FixedBytes::<20>::with_last_byte(1)),
+                filters: Some(vec![LogsRequestFilter {
+                    table_id: Some(FixedBytes::<32>::with_last_byte(1)),
+                    key0: Some(FixedBytes::<32>::with_last_byte(1)),
+                    key1: Some(FixedBytes::<32>::with_last_byte(1)),
+                }]),
+            },
+        );
         assert_eq!(query.params.len(), 5);
         assert_eq!(fmt_sql(&query.to_sql()).unwrap(), fmt_sql(r#"
             SELECT
