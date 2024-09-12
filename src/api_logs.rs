@@ -31,12 +31,12 @@ pub struct LogArg {
     table_id: FixedBytes<32>,
     #[serde(rename = "keyTuple")]
     key_tuple: Vec<FixedBytes<32>>,
-    #[serde(rename = "staticData")]
-    static_data: Bytes,
-    #[serde(rename = "encodedLengths")]
-    encoded_lengths: Bytes,
-    #[serde(rename = "dynamicData")]
-    dynamic_data: Bytes,
+    #[serde(rename = "staticData", skip_serializing_if = "Option::is_none")]
+    static_data: Option<Bytes>,
+    #[serde(rename = "encodedLengths", skip_serializing_if = "Option::is_none")]
+    encoded_lengths: Option<Bytes>,
+    #[serde(rename = "dynamicData", skip_serializing_if = "Option::is_none")]
+    dynamic_data: Option<Bytes>,
 }
 
 #[derive(Serialize, Debug)]
@@ -59,6 +59,17 @@ impl Log {
             .chunks(32)
             .map(|chunk| FixedBytes::<32>::from_slice(chunk))
             .collect();
+        let (sd, el, dd) = if row.get("deleted") {
+            (None, None, None)
+        } else {
+            (
+                Some(Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?)),
+                Some(Bytes::from(
+                    row.try_get::<&str, Vec<u8>>("encoded_lengths")?,
+                )),
+                Some(Bytes::from(row.try_get::<&str, Vec<u8>>("dynamic_data")?)),
+            )
+        };
         Ok(Log {
             address: row.try_get("address")?,
             event_name: String::from("Store_SetRecord"),
@@ -67,9 +78,9 @@ impl Log {
             args: LogArg {
                 table_id: row.try_get("table_id")?,
                 key_tuple: key,
-                static_data: Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?),
-                encoded_lengths: Bytes::from(row.try_get::<&str, Vec<u8>>("encoded_lengths")?),
-                dynamic_data: Bytes::from(row.try_get::<&str, Vec<u8>>("dynamic_data")?),
+                static_data: sd,
+                encoded_lengths: el,
+                dynamic_data: dd,
             },
         })
     }
@@ -227,7 +238,7 @@ impl LogsQuery {
         let block_num_predicate = if let Some(n) = self.min_block_num {
             format!("and block_num >= {}", n)
         } else {
-            String::new()
+            String::from("and not deleted")
         };
         format!(
             r#"
@@ -243,13 +254,14 @@ impl LogsQuery {
                     THEN '\x00'::bytea
                     ELSE encoded_lengths
                 END AS encoded_lengths,
-                dynamic_data
+                dynamic_data,
+                deleted
             from records
             where not expired
-            and not deleted
             and address = $1
             {}
             {}
+            LIMIT 100
             "#,
             block_num_predicate,
             self.filters_sql()
@@ -295,11 +307,12 @@ mod tests {
                         THEN '\x00'::bytea
                         ELSE encoded_lengths
                     END AS encoded_lengths,
-                    dynamic_data
+                    dynamic_data,
+                    deleted
                 from records
                 where not expired
-                and not deleted
                 and address = $1
+                and not deleted
                 "#
             )
             .unwrap()
@@ -332,10 +345,10 @@ mod tests {
                         THEN '\x00'::bytea
                         ELSE encoded_lengths
                     END AS encoded_lengths,
-                    dynamic_data
+                    dynamic_data,
+                    deleted
                 from records
                 where not expired
-                and not deleted
                 and address = $1
                 and block_num >= 42
                 "#
@@ -372,11 +385,12 @@ mod tests {
                     THEN '\x00'::bytea
                     ELSE encoded_lengths
                 END AS encoded_lengths,
-                dynamic_data
+                dynamic_data,
+                deleted
             FROM records
             WHERE NOT expired
-            AND NOT deleted
             AND address = $1
+            AND NOT deleted
             AND (
                 (table_id = $2 AND sdec(key, 0, 32) = $3 AND sdec(key, 32, 32) = $4)
                 OR
