@@ -250,7 +250,6 @@ impl LogsQuery {
             and address = $1
             {}
             {}
-            limit 100
             "#,
             block_num_predicate,
             self.filters_sql()
