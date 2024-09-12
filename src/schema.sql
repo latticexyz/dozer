@@ -83,6 +83,8 @@ where not expired and not deleted;
 create index if not exists "records_key_0" on records(sdec(key, 0, 32)) where not expired and not deleted;
 create index if not exists "records_key_1" on records(sdec(key, 32, 32)) where not expired and not deleted;
 
+create index if not exists "records_block_num" on records(block_num desc) where not expired and not deleted;
+
 create table if not exists tables(
     block_num numeric,
     log_idx numeric,

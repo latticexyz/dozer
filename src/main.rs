@@ -245,6 +245,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             .route("/q-live", get(api_sql::handle_sse))
             .route("/tables", post(api_tables::handle))
             .route("/api/logs", get(api_logs::handle))
+            .route("/api/logs-live", get(api_logs::handle_sse))
             .layer(service)
             .layer(CorsLayer::permissive())
             .with_state(config.clone()),

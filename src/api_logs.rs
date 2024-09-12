@@ -1,17 +1,28 @@
+use std::convert::Infallible;
+
 use crate::api;
 
 use alloy::primitives::{fixed_bytes, Bytes, FixedBytes};
-use axum::{extract::Query, extract::State, Json};
+use axum::{
+    extract::State,
+    response::{
+        sse::{Event, KeepAlive},
+        Sse,
+    },
+    Json,
+};
+use axum_extra::extract::Form;
 use eyre::{Context, Result};
+use futures::Stream;
 use itertools::Itertools;
 use ruint::aliases::U64;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::{types::ToSql, Row};
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct LogsRequest {
     input: String,
-    block_num: Option<U64>,
+    block_num: Option<u64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -67,14 +78,36 @@ impl Log {
 #[derive(Serialize, Debug)]
 pub struct LogsResponse {
     #[serde(rename = "blockNumber")]
-    block_num: String,
+    block_num: u64,
     logs: Vec<Log>,
+}
+
+pub async fn handle_sse(
+    State(conf): State<api::Config>,
+    Form(req): Form<LogsRequest>,
+) -> axum::response::Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut req = req.clone();
+    let mut rx = conf.broadcaster.add();
+    let stream = async_stream::stream! {
+        loop {
+            let resp = handle(State(conf.clone()), Form(req.clone()))
+                .await
+                .expect("unable to make request");
+            let last_block = resp.block_num;
+            yield Ok(Event::default()
+                .json_data(resp.0)
+                .expect("unable to seralize json"));
+            rx.recv().await.expect("unable to receive new block update");
+            req.block_num = Some(last_block + 1);
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 #[tracing::instrument(skip_all)]
 pub async fn handle(
     State(state): State<api::Config>,
-    Query(query): Query<LogsRequest>,
+    Form(query): Form<LogsRequest>,
 ) -> Result<Json<LogsResponse>, api::Error> {
     let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
     let query = LogsQuery::new(query.block_num, req_input);
@@ -96,11 +129,9 @@ pub async fn handle(
         .sorted_by_key(|l| (l.block_num, l.log_idx))
         .collect_vec();
 
-    let bres = pg
-        .query_one("select max(num)::text from blocks", &[])
-        .await?;
+    let bres = pg.query_one("select max(num) from blocks", &[]).await?;
     Ok(Json(LogsResponse {
-        block_num: bres.get(0),
+        block_num: bres.get::<usize, U64>(0).to(),
         logs: res,
     }))
 }
@@ -125,7 +156,7 @@ type Param = (dyn ToSql + Sync + Send);
 
 #[derive(Default, Debug)]
 struct LogsQuery {
-    min_block_num: Option<U64>,
+    min_block_num: Option<u64>,
     or_predicates: Vec<String>,
     and_predicates: Vec<String>,
     num_params: i32,
@@ -133,7 +164,7 @@ struct LogsQuery {
 }
 
 impl LogsQuery {
-    fn new(min_block_num: Option<U64>, input: LogsRequestInput) -> Self {
+    fn new(min_block_num: Option<u64>, input: LogsRequestInput) -> Self {
         let mut query = LogsQuery {
             min_block_num,
             num_params: 0,
@@ -219,6 +250,7 @@ impl LogsQuery {
             and address = $1
             {}
             {}
+            limit 100
             "#,
             block_num_predicate,
             self.filters_sql()
@@ -278,7 +310,7 @@ mod tests {
     #[test]
     fn test_logs_query_min_block_num() {
         let query = LogsQuery::new(
-            Some(U64::from(42)),
+            Some(42),
             LogsRequestInput {
                 _chain_id: Some(690),
                 address: Some(FixedBytes::<20>::with_last_byte(1)),
