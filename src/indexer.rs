@@ -390,6 +390,7 @@ type RecordId = (FixedBytes<20>, FixedBytes<32>, Vec<u8>);
 #[derive(Debug)]
 pub struct Record {
     pub block_num: U64,
+    pub tx_hash: FixedBytes<32>,
     pub log_idx: U64,
     pub address: FixedBytes<20>,
     pub table_id: FixedBytes<32>,
@@ -408,6 +409,7 @@ impl Record {
     fn default(id: RecordId) -> Self {
         Record {
             block_num: U64::from(0),
+            tx_hash: FixedBytes::<32>::ZERO,
             log_idx: U64::from(0),
             address: id.0,
             table_id: id.1,
@@ -422,6 +424,7 @@ impl Record {
     pub fn from_row(row: &Row) -> Result<Self, tokio_postgres::Error> {
         Ok(Record {
             block_num: row.try_get("block_num")?,
+            tx_hash: row.try_get("tx_hash")?,
             log_idx: row.try_get("log_idx")?,
             address: row.try_get("address")?,
             table_id: row.try_get("table_id")?,
@@ -445,7 +448,7 @@ impl Record {
                     unnest($2::bytea[]) table_id,
                     unnest($3::bytea[]) key
             )
-            select block_num, log_idx, r.address, r.table_id, r.key, static_data, encoded_lengths, dynamic_data, deleted
+            select block_num, tx_hash, log_idx, r.address, r.table_id, r.key, static_data, encoded_lengths, dynamic_data, deleted
             from records r
             join q
             on (r.address, r.table_id, r.key) =  (q.address, q.table_id, q.key)
@@ -508,6 +511,7 @@ impl Record {
                 encoded_lengths,
                 dynamic_data,
                 block_num,
+                tx_hash,
                 log_idx,
                 deleted
             )
@@ -524,6 +528,7 @@ impl Record {
                 tokio_postgres::types::Type::BYTEA,
                 tokio_postgres::types::Type::BYTEA,
                 tokio_postgres::types::Type::NUMERIC,
+                tokio_postgres::types::Type::BYTEA,
                 tokio_postgres::types::Type::INT4,
                 tokio_postgres::types::Type::BOOL,
             ],
@@ -540,6 +545,7 @@ impl Record {
                     &r.encoded_lengths,
                     &r.dynamic_data,
                     &r.block_num,
+                    &r.tx_hash,
                     &r.log_idx,
                     &r.deleted,
                 ])
@@ -556,6 +562,7 @@ impl Record {
 
     fn update(&mut self, u: Update) {
         self.block_num = U64::from(u.block_num);
+        self.tx_hash = u.tx_hash;
         self.log_idx = U64::from(u.log_idx);
         match u.kind {
             UpdateKind::Del => {
@@ -620,6 +627,7 @@ enum UpdateKind {
 #[derive(Debug)]
 struct Update {
     block_num: u64,
+    tx_hash: FixedBytes<32>,
     log_idx: u64,
     address: FixedBytes<20>,
     table_id: FixedBytes<32>,
@@ -633,8 +641,9 @@ impl Update {
     }
 
     fn from_log(log: Log) -> Result<Option<Self>, IndexError> {
-        let (block_num, log_addr, log_idx) = (
+        let (block_num, tx_hash, log_addr, log_idx) = (
             log.block_number.wrap_err("missing block num from log")?,
+            log.transaction_hash.unwrap_or_default(),
             *log.address(),
             log.log_index.wrap_err("missing log idx from log")?,
         );
@@ -644,6 +653,7 @@ impl Update {
                     .wrap_err("decoding set record")?;
                 Ok(Some(Update {
                     block_num,
+                    tx_hash,
                     log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
@@ -660,6 +670,7 @@ impl Update {
                     .wrap_err("decoding splice dynamic")?;
                 Ok(Some(Update {
                     block_num,
+                    tx_hash,
                     log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
@@ -677,6 +688,7 @@ impl Update {
                     .wrap_err("decoding splice static")?;
                 Ok(Some(Update {
                     block_num,
+                    tx_hash,
                     log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
@@ -692,6 +704,7 @@ impl Update {
                     .wrap_err("decoding delete record")?;
                 Ok(Some(Update {
                     block_num,
+                    tx_hash,
                     log_idx,
                     address: log_addr,
                     table_id: rec.table_id,
