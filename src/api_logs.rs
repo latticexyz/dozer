@@ -62,10 +62,11 @@ impl Log {
             .chunks(32)
             .map(|chunk| FixedBytes::<32>::from_slice(chunk))
             .collect();
-        let (sd, el, dd) = if row.get("deleted") {
-            (None, None, None)
+        let (ename, sd, el, dd) = if row.get("deleted") {
+            (String::from("Store_DeleteRecord"), None, None, None)
         } else {
             (
+                String::from("Store_SetRecord"),
                 Some(Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?)),
                 Some(Bytes::from(
                     row.try_get::<&str, Vec<u8>>("encoded_lengths")?,
@@ -75,7 +76,7 @@ impl Log {
         };
         Ok(Log {
             address: row.try_get("address")?,
-            event_name: String::from("Store_SetRecord"),
+            event_name: ename,
             block_num: row.try_get("block_num")?,
             tx_hash: row.try_get("tx_hash").ok(),
             log_idx: row.try_get("log_idx")?,
