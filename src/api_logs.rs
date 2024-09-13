@@ -23,6 +23,7 @@ use tokio_postgres::{types::ToSql, Row};
 pub struct LogsRequest {
     input: String,
     block_num: Option<u64>,
+    include_tx_hash: Option<bool>,
 }
 
 #[derive(Serialize, Debug)]
@@ -48,6 +49,8 @@ pub struct Log {
 
     #[serde(skip_serializing)]
     block_num: U64,
+    #[serde(rename = "txHash", skip_serializing_if = "Option::is_none")]
+    tx_hash: Option<FixedBytes<32>>,
     #[serde(skip_serializing)]
     log_idx: U64,
 }
@@ -74,6 +77,7 @@ impl Log {
             address: row.try_get("address")?,
             event_name: String::from("Store_SetRecord"),
             block_num: row.try_get("block_num")?,
+            tx_hash: row.try_get("tx_hash").ok(),
             log_idx: row.try_get("log_idx")?,
             args: LogArg {
                 table_id: row.try_get("table_id")?,
@@ -98,6 +102,7 @@ pub async fn handle_sse(
     Form(req): Form<LogsRequest>,
 ) -> axum::response::Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut req = req.clone();
+    req.include_tx_hash = Some(true);
     let mut rx = conf.broadcaster.add();
     let stream = async_stream::stream! {
         loop {
@@ -120,6 +125,7 @@ pub async fn handle(
     State(state): State<api::Config>,
     Form(query): Form<LogsRequest>,
 ) -> Result<Json<LogsResponse>, api::Error> {
+    let include_tx_hash = query.include_tx_hash;
     let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
     let query = LogsQuery::new(query.block_num, req_input);
 
@@ -131,7 +137,7 @@ pub async fn handle(
 
     let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
     let res: Vec<Log> = pg
-        .query(&query.to_sql(), params)
+        .query(&query.to_sql(include_tx_hash.unwrap_or(false)), params)
         .await?
         .iter()
         .map(Log::from_row)
@@ -234,16 +240,22 @@ impl LogsQuery {
         }
     }
 
-    fn to_sql(&self) -> String {
+    fn to_sql(&self, include_tx_hash: bool) -> String {
         let block_num_predicate = if let Some(n) = self.min_block_num {
             format!("and block_num >= {}", n)
         } else {
             String::from("and not deleted")
         };
+        let tx_hash = if include_tx_hash {
+            String::from("tx_hash,")
+        } else {
+            String::new()
+        };
         format!(
             r#"
             select
                 block_num,
+                {}
                 log_idx,
                 address,
                 table_id,
@@ -262,6 +274,7 @@ impl LogsQuery {
             {}
             {}
             "#,
+            tx_hash,
             block_num_predicate,
             self.filters_sql()
         )
@@ -291,7 +304,7 @@ mod tests {
             },
         );
         assert_eq!(
-            fmt_sql(&query.to_sql()).expect("invalid sql"),
+            fmt_sql(&query.to_sql(false)).expect("invalid sql"),
             fmt_sql(
                 r#"
                 select
@@ -329,7 +342,7 @@ mod tests {
             },
         );
         assert_eq!(
-            fmt_sql(&query.to_sql()).expect("invalid sql"),
+            fmt_sql(&query.to_sql(false)).expect("invalid sql"),
             fmt_sql(
                 r#"
                 select
@@ -371,7 +384,7 @@ mod tests {
             },
         );
         assert_eq!(query.params.len(), 5);
-        assert_eq!(fmt_sql(&query.to_sql()).unwrap(), fmt_sql(r#"
+        assert_eq!(fmt_sql(&query.to_sql(false)).unwrap(), fmt_sql(r#"
             SELECT
                 block_num,
                 log_idx,

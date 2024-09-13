@@ -65,6 +65,7 @@ create table if not exists records(
     encoded_lengths bytea,
     dynamic_data bytea,
     block_num numeric,
+    tx_hash bytea,
     log_idx int,
     expired bool default false not null,
     deleted bool default false not null,
