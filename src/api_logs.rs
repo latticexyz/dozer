@@ -16,8 +16,15 @@ use eyre::{Context, Result};
 use futures::Stream;
 use itertools::Itertools;
 use ruint::aliases::U64;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use tokio_postgres::{types::ToSql, Row};
+
+fn u64_to_string<S>(x: &u64, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_str(&x.to_string())
+}
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct LogsRequest {
@@ -93,7 +100,7 @@ impl Log {
 
 #[derive(Serialize, Debug)]
 pub struct LogsResponse {
-    #[serde(rename = "blockNumber")]
+    #[serde(serialize_with = "u64_to_string", rename = "blockNumber")]
     block_num: u64,
     logs: Vec<Log>,
 }
