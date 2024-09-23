@@ -56,7 +56,7 @@ pub struct Log {
 
     #[serde(skip_serializing)]
     block_num: U64,
-    #[serde(rename = "txHash", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "transactionHash", skip_serializing_if = "Option::is_none")]
     tx_hash: Option<FixedBytes<32>>,
     #[serde(skip_serializing)]
     log_idx: U64,
