@@ -76,6 +76,9 @@ struct ServerArgs {
     #[clap(long, default_value = "0.0.0.0:8000")]
     listen: String,
 
+    #[clap(long, default_value = "false")]
+    enable_wiresaw: bool,
+
     #[command(flatten)]
     backup: backup::Args,
 }
@@ -280,14 +283,16 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             println!("unable lock for indexing: {}", err);
             return;
         }
-        //TODO: this is a workaround for the redstone RPC API not having a reliable
-        //block range limit for the eth_getLogs request.
-        let mut batch_size = args.batch_size;
+        let mut params = indexer::IndexParams::default()
+            //TODO: this is a workaround for the redstone RPC API not having a reliable
+            //block range limit for the eth_getLogs request.
+            .with_batch_size(args.batch_size)
+            .with_wiresaw(args.enable_wiresaw);
         loop {
-            match indexer::index(&eth_client, &mut w_pg, batch_size).await {
+            match indexer::index(&eth_client, &mut w_pg, &params).await {
                 Ok(next) => {
                     config.broadcaster.broadcast(next);
-                    batch_size = args.batch_size
+                    params.batch_size = args.batch_size
                 }
                 Err(indexer::IndexError::NothingNew(n)) => {
                     tracing::info!("nothing new. latest: {}", n);
@@ -298,7 +303,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
                     std::process::exit(1);
                 }
                 Err(indexer::IndexError::Retry(e)) => {
-                    batch_size = std::cmp::max(1, batch_size / 10);
+                    params.batch_size = std::cmp::max(1, params.batch_size / 10);
                     tracing::error!("indexer retry: {:?}", e.to_string());
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
