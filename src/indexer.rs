@@ -1049,6 +1049,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_index_pending() {
+        logging();
+        let (_pg_server, mut pg) = test_pg().await;
+
+        let mut trg = TestGetRemote {
+            block: test_block(1, 1, 0),
+            logs: vec![],
+        };
+        pg.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(1), &trg.block.header.hash.unwrap()],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        let from = index(&trg, &mut pg, 10).await.expect("unable to index");
+        assert_eq!(from, 1);
+
+        let rid1 = (
+            FixedBytes::<20>::with_last_byte(0x01),
+            B256::with_last_byte(0x01),
+            B256::with_last_byte(0x01).to_vec(),
+        );
+        let mut ids = HashSet::new();
+        ids.insert(rid1.clone());
+
+        // some wild pending logs appear. Notice they point to the pending block 2.
+        trg.logs = vec![
+            sr(test_block(2, 0, 1), 1, rid1.clone()),
+            ss(
+                test_block(2, 0, 1),
+                2,
+                rid1.clone(),
+                0,
+                Bytes::copy_from_slice(&B256::repeat_byte(0x1)[..]),
+            ),
+            dr(test_block(2, 0, 1), 3, rid1.clone()),
+        ];
+
+        let from = index(&trg, &mut pg, 10).await.expect("unable to index");
+        assert_eq!(from, 1);
+
+        {
+            let pgtx = pg.transaction().await.expect("opening index tx");
+            let recs = Record::load(&pgtx, ids.clone())
+                .await
+                .expect("loading records");
+            let rec = recs.get(&rid1).expect("finding record");
+            assert_eq!(rec.static_data, &[0u8; 0]);
+
+            // calling next to index now should return the correct log index.
+            let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
+            if let NextRange::Pending {
+                num,
+                latest,
+                log_index,
+            } = next_range
+            {
+                assert_eq!(num, 2);
+                assert_eq!(latest.num, 1);
+                assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+                assert_eq!(log_index, Some(3));
+            } else {
+                panic!("expected pending range");
+            }
+        }
+
+        // the new canonical block is now available.
+        trg.logs = vec![];
+        trg.block = test_block(2, 2, 1);
+        {
+            // next_to_index should be the latest block with log_index offset.
+            let pgtx = pg.transaction().await.expect("opening index tx");
+            let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
+            if let NextRange::Pending {
+                num,
+                latest,
+                log_index,
+            } = next_range
+            {
+                assert_eq!(num, 2);
+                assert_eq!(latest.num, 2);
+                assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+                assert_eq!(log_index, Some(3));
+            } else {
+                panic!("expected pending range");
+            }
+        }
+        let from = index(&trg, &mut pg, 10).await.expect("unable to index");
+        assert_eq!(from, 2);
+    }
+
+    #[tokio::test]
     async fn test_next_to_index() {
         logging();
         let (_pg_server, mut pg) = test_pg().await;
@@ -1070,6 +1163,108 @@ mod tests {
             assert_eq!(to.num, 10);
         } else {
             panic!("expected canonical range");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_next_to_index_pending() {
+        logging();
+        let (_pg_server, mut pg) = test_pg().await;
+
+        let mut trg = TestGetRemote {
+            block: test_block(1, 1, 0),
+            logs: vec![],
+        };
+
+        // 1. latest block is fully indexed, we can increment to pending.
+        let pgtx = pg.transaction().await.expect("opening index tx");
+        pgtx.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(1), &trg.block.header.hash.unwrap()],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 2);
+            assert_eq!(latest.num, 1);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+        } else {
+            panic!("expected pending range");
+        }
+
+        // 2. keep polling pending logs.
+        pgtx.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(2), &B256::ZERO],
+        )
+        .await
+        .expect("setting up blocks table");
+        let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 2);
+            assert_eq!(latest.num, 1);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+        } else {
+            panic!("expected pending range");
+        }
+
+        // 3. Latest block has caught up, last poll on latest.
+        trg.block = test_block(2, 2, 1);
+        let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 2);
+            assert_eq!(latest.num, 2);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+
+            // override pending block with correct block ref.
+            const Q: &str = "
+                INSERT INTO blocks(num, hash) 
+                VALUES ($1, $2)
+                ON CONFLICT (num) 
+                DO UPDATE 
+                SET hash = EXCLUDED.hash
+            ";
+            pgtx.execute(Q, &[&U64::from(latest.num), &latest.hash])
+                .await
+                .expect("setting up blocks table");
+        } else {
+            panic!("expected pending range");
+        }
+
+        // 4. Moving on to next pending block
+        let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 3);
+            assert_eq!(latest.num, 2);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+        } else {
+            panic!("expected pending range");
         }
     }
 
