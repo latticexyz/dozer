@@ -966,6 +966,13 @@ mod tests {
                 _ => panic!("ah"),
             }
         }
+        async fn pending_logs(
+            &self,
+            _: Filter,
+            _: Option<u64>,
+        ) -> eyre::Result<Vec<Log>, IndexError> {
+            Ok(self.logs.clone())
+        }
     }
 
     #[tokio::test]
@@ -1058,8 +1065,12 @@ mod tests {
             logs: vec![],
         };
         let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
-        assert_eq!(next_range.from.num, 1);
-        assert_eq!(next_range.to.num, 10);
+        if let NextRange::Canonical { from, to } = next_range {
+            assert_eq!(from.num, 1);
+            assert_eq!(to.num, 10);
+        } else {
+            panic!("expected canonical range");
+        }
     }
 
     #[tokio::test]
