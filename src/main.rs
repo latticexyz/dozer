@@ -79,6 +79,9 @@ struct ServerArgs {
     #[clap(long, default_value = "false")]
     enable_wiresaw: bool,
 
+    #[clap(long, default_value = "1s")]
+    indexer_backoff: humantime::Duration,
+
     #[command(flatten)]
     backup: backup::Args,
 }
@@ -288,6 +291,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             //block range limit for the eth_getLogs request.
             .with_batch_size(args.batch_size)
             .with_wiresaw(args.enable_wiresaw);
+        let backoff: Duration = args.indexer_backoff.into();
         loop {
             match indexer::index(&eth_client, &mut w_pg, &params).await {
                 Ok(next) => {
@@ -296,7 +300,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
                 }
                 Err(indexer::IndexError::NothingNew(n)) => {
                     tracing::info!("nothing new. latest: {}", n);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(backoff).await;
                 }
                 Err(indexer::IndexError::Fatal(e)) => {
                     tracing::error!(%e, "An error occurred: {:?}", e);
@@ -305,7 +309,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
                 Err(indexer::IndexError::Retry(e)) => {
                     params.batch_size = std::cmp::max(1, params.batch_size / 10);
                     tracing::error!("indexer retry: {:?}", e.to_string());
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }

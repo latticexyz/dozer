@@ -481,6 +481,11 @@ pub async fn index<T: EthApi>(
         .record("updates", updates_count)
         .record("records", records_count);
 
+    // if pending block and no updates avoid broadcasting updates
+    if updates_count == 0 && to.hash == B256::ZERO {
+        return Err(IndexError::NothingNew(from.num));
+    }
+
     Ok(from.num)
 }
 
