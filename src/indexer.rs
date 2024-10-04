@@ -78,14 +78,23 @@ impl From<tokio_postgres::Error> for IndexError {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 struct NumHash {
     num: u64,
     hash: FixedBytes<32>,
 }
 
-struct NextRange {
-    from: NumHash,
-    to: NumHash,
+#[derive(Debug, Clone, Copy)]
+enum NextRange {
+    Canonical {
+        from: NumHash,
+        to: NumHash,
+    },
+    Pending {
+        num: u64,
+        latest: NumHash,
+        log_index: Option<u64>,
+    },
 }
 
 pub async fn init_blocks<F: EthApi>(
@@ -118,6 +127,12 @@ async fn get_local_latest(tx: &Transaction<'_>) -> eyre::Result<(U64, BlockHash)
     Ok((row.try_get("num")?, row.try_get("hash")?))
 }
 
+async fn get_log_idx(tx: &Transaction<'_>, block_num: u64) -> eyre::Result<U64> {
+    let q = "SELECT log_idx FROM records WHERE block_num = $1 order by log_idx desc limit 1";
+    let row = tx.query_one(q, &[&U64::from(block_num)]).await?;
+    Ok(row.try_get("log_idx")?)
+}
+
 #[async_trait]
 /// A subset of the ETH RPC API used by this indexer
 /// We use alloy's ReqwestProvider for normal operations
@@ -126,6 +141,11 @@ async fn get_local_latest(tx: &Transaction<'_>) -> eyre::Result<(U64, BlockHash)
 pub trait EthApi {
     async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError>;
     async fn logs(&self, filter: Filter) -> eyre::Result<Vec<Log>, IndexError>;
+    async fn pending_logs(
+        &self,
+        f: Filter,
+        log_index: Option<u64>,
+    ) -> eyre::Result<Vec<Log>, IndexError>;
 }
 
 #[async_trait]
@@ -194,17 +214,62 @@ impl EthApi for ReqwestProvider {
         tracing::Span::current().record("logs", logs.len());
         Ok(logs)
     }
+
+    #[tracing::instrument(skip_all fields(logs))]
+    async fn pending_logs(
+        &self,
+        f: Filter,
+        log_index: Option<u64>,
+    ) -> eyre::Result<Vec<Log>, IndexError> {
+        let logs: Vec<Log> = self
+            .raw_request("wiresaw_getLogs".into(), &(&f, &log_index))
+            .await
+            .map_err(|e| IndexError::Retry(eyre::eyre!("logs {}", e)))?;
+        tracing::Span::current().record("logs", logs.len());
+        Ok(logs)
+    }
 }
 
-#[tracing::instrument(fields(local, remote, removed) skip_all)]
+#[derive(Debug, Clone, Copy)]
+pub struct IndexParams {
+    pub batch_size: u64,
+    pub max_reorg: u64,
+    pub enable_wiresaw: bool,
+}
+
+impl Default for IndexParams {
+    fn default() -> Self {
+        IndexParams {
+            batch_size: 10,
+            max_reorg: 100,
+            enable_wiresaw: false,
+        }
+    }
+}
+
+impl IndexParams {
+    pub fn with_wiresaw(mut self, enable: bool) -> Self {
+        self.enable_wiresaw = enable;
+        self
+    }
+    pub fn with_batch_size(mut self, size: u64) -> Self {
+        self.batch_size = size;
+        self
+    }
+    pub fn with_max_reorg(mut self, size: u64) -> Self {
+        self.max_reorg = size;
+        self
+    }
+}
+
+#[tracing::instrument(fields(local, remote, removed, pending, log_index) skip_all)]
 async fn next_to_index<F: EthApi>(
     pgtx: &Transaction<'_>,
     remote: &F,
-    batch_size: u64,
-    max_reorg: u64,
+    params: &IndexParams,
 ) -> eyre::Result<NextRange, IndexError> {
     let mut removed = 0;
-    for _ in 0..max_reorg {
+    for _ in 0..params.max_reorg {
         let latest_remote = remote.block(BlockNumberOrTag::Latest).await?;
         let remote_num = latest_remote.header.number.unwrap();
         let (local_num, local_hash) = get_local_latest(pgtx).await.map_err(IndexError::Retry)?;
@@ -214,10 +279,43 @@ async fn next_to_index<F: EthApi>(
             .record("remote", remote_num)
             .record("local", local_num);
 
+        // If the local block number is greater or equal to the latest remote block we can poll the
+        // wiresaw endpoint for pending logs. This path has 3 possible cases:
+        // 1. The local block is the latest block and fully stored in the db, we can increment to tell wiresaw
+        //    to query logs from the pending block.
+        // 2. The local block is the pending block, the local hash is B256::ZERO, we can keep
+        //    polling it to check if there are more logs, querying each time the local log index
+        //    in case we already have some logs stored.
+        // 3. The latest block has caught up with our local pending block, we are doing one last poll on
+        //    the wiresaw logs endpoint to make sure we didn't miss any logs by including our local
+        //    log index.
         if local_num >= remote_num {
-            return Err(IndexError::NothingNew(local_num));
+            if !params.enable_wiresaw {
+                return Err(IndexError::NothingNew(local_num));
+            }
+            let (num, log_index) =
+                if local_num == remote_num && local_hash == latest_remote.header.hash.unwrap() {
+                    // avoid unnecessary db query, this is our first time querying the pending logs.
+                    (local_num + 1, None)
+                } else {
+                    (
+                        local_num,
+                        get_log_idx(pgtx, local_num).await.ok().map(|i| i.to()),
+                    )
+                };
+            tracing::Span::current()
+                .record("pending", num)
+                .record("log_index", log_index);
+            return Ok(NextRange::Pending {
+                num,
+                latest: NumHash {
+                    num: remote_num,
+                    hash: latest_remote.header.hash.unwrap(),
+                },
+                log_index,
+            });
         }
-        let delta = cmp::min(remote_num - local_num, batch_size);
+        let delta = cmp::min(remote_num - local_num, params.batch_size);
         let (from, to) = (
             remote
                 .block(BlockNumberOrTag::Number(local_num + 1))
@@ -248,17 +346,16 @@ async fn next_to_index<F: EthApi>(
             )
             .await?;
             pgtx.execute(
-                "delete from records where block_num >= $1",
-                &[&U64::from(local_num)],
-            )
-            .await?;
-            pgtx.execute(
                 "
-                with latest as (
-                    select max(block_num) as block_num, address, table_id, key
+                 with deleted as (
+	            delete from records where block_num >= $1
+	            returning address, table_id, key
+                ),
+                latest as (
+  	            select max(block_num) as block_num, address, table_id, key
                     from records
                     where expired
-                    and block_num >= $1
+	            and (address, table_id, key) in (select address, table_id, key from deleted)
                     group by address, table_id, key
                 )
                 update records r set expired = false
@@ -266,14 +363,14 @@ async fn next_to_index<F: EthApi>(
                 where (r.address, r.table_id, r.key) = (latest.address, latest.table_id, latest.key)
                 and r.block_num = latest.block_num
                 ",
-                &[&U64::from(cmp::max(local_num as i64 - max_reorg as i64, 0))],
+                &[&U64::from(local_num)],
             )
             .await?;
             removed += 1;
             continue;
         }
         tracing::Span::current().record("removed", removed);
-        return Ok(NextRange {
+        return Ok(NextRange::Canonical {
             from: NumHash {
                 num: from.header.number.unwrap(),
                 hash: from.header.hash.unwrap(),
@@ -291,23 +388,45 @@ async fn next_to_index<F: EthApi>(
 pub async fn index<T: EthApi>(
     remote: &T,
     pg: &mut Client,
-    batch_size: u64,
+    params: &IndexParams,
 ) -> eyre::Result<u64, IndexError> {
     let pgtx = pg.transaction().await.wrap_err("opening index tx")?;
-    let next = next_to_index(&pgtx, remote, batch_size, 100).await?;
+    let next = next_to_index(&pgtx, remote, params).await?;
     pgtx.commit().await.wrap_err("unable to commit tx")?;
 
-    let filter = Filter::new()
-        .events([
-            &Store_SetRecord::SIGNATURE,
-            &Store_SpliceDynamicData::SIGNATURE,
-            &Store_SpliceStaticData::SIGNATURE,
-            &Store_DeleteRecord::SIGNATURE,
-        ])
-        .select(next.from.num..next.to.num);
-    let updates: Vec<Update> = remote
-        .logs(filter)
-        .await?
+    let filter = Filter::new().events([
+        &Store_SetRecord::SIGNATURE,
+        &Store_SpliceDynamicData::SIGNATURE,
+        &Store_SpliceStaticData::SIGNATURE,
+        &Store_DeleteRecord::SIGNATURE,
+    ]);
+
+    let (logs, from, to) = match next {
+        NextRange::Canonical { from, to } => {
+            let logs = remote.logs(filter.select(from.num..to.num)).await?;
+            (logs, from, to)
+        }
+        NextRange::Pending {
+            num,
+            log_index,
+            latest,
+        } => {
+            let logs = remote.pending_logs(filter.select(num), log_index).await?;
+            // if the block num is the latest block we can finally replace the pending block with
+            // the actual latest block ref.
+            let to = if num == latest.num {
+                latest
+            } else {
+                NumHash {
+                    num,
+                    hash: B256::ZERO,
+                }
+            };
+            (logs, latest, to)
+        }
+    };
+
+    let updates: Vec<Update> = logs
         .into_iter()
         .map(Update::from_log)
         .collect::<Result<Vec<Option<Update>>, IndexError>>()?
@@ -343,20 +462,31 @@ pub async fn index<T: EthApi>(
     });
     Record::expire(&tx, updated).await?;
     Record::copy(&tx, records).await?;
-    tx.execute(
-        "insert into blocks(num, hash) values ($1, $2)",
-        &[&U64::from(next.to.num), &next.to.hash],
-    )
-    .await
-    .wrap_err(format!("updating blocks table to latest {}", next.to.num))?;
+    // If we have a conflict we are replacing a pending block ref with a canonical block ref.
+    const Q: &str = "
+        INSERT INTO blocks(num, hash) 
+        VALUES ($1, $2)
+        ON CONFLICT (num) 
+        DO UPDATE 
+        SET hash = EXCLUDED.hash
+    ";
+    tx.execute(Q, &[&U64::from(to.num), &to.hash])
+        .await
+        .wrap_err(format!("updating blocks table to latest {}", to.num))?;
     tx.commit().await.wrap_err("unable to commit tx")?;
 
     tracing::Span::current()
-        .record("from", next.from.num)
-        .record("to", next.to.num)
+        .record("from", from.num)
+        .record("to", to.num)
         .record("updates", updates_count)
         .record("records", records_count);
-    Ok(next.from.num)
+
+    // if pending block and no updates avoid broadcasting updates
+    if updates_count == 0 && to.hash == B256::ZERO {
+        return Err(IndexError::NothingNew(from.num));
+    }
+
+    Ok(from.num)
 }
 
 #[tracing::instrument(fields(id, block_num, log_idx), skip_all)]
@@ -878,11 +1008,23 @@ mod tests {
                 _ => panic!("ah"),
             }
         }
+        async fn pending_logs(
+            &self,
+            _: Filter,
+            _: Option<u64>,
+        ) -> eyre::Result<Vec<Log>, IndexError> {
+            Ok(self.logs.clone())
+        }
     }
 
     #[tokio::test]
     async fn test_index() {
         logging();
+        let params = IndexParams {
+            batch_size: 1,
+            max_reorg: 100,
+            enable_wiresaw: true,
+        };
         let (_pg_server, mut pg) = test_pg().await;
         pg.execute(
             "insert into blocks(num, hash) values ($1, $2)",
@@ -916,7 +1058,7 @@ mod tests {
                     ],
                 },
                 &mut pg,
-                1,
+                &params,
             )
             .await
             .expect("unable to index");
@@ -940,7 +1082,7 @@ mod tests {
                     )],
                 },
                 &mut pg,
-                1,
+                &params,
             )
             .await
             .expect("unable to index");
@@ -951,6 +1093,141 @@ mod tests {
             let rec = recs.get(&rid1).expect("finding record");
             assert_eq!(rec.static_data, &[1u8; 32]);
         }
+    }
+
+    #[tokio::test]
+    async fn test_index_pending() {
+        logging();
+        let (_pg_server, mut pg) = test_pg().await;
+
+        let params = IndexParams::default().with_wiresaw(true);
+
+        let mut trg = TestGetRemote {
+            block: test_block(1, 1, 0),
+            logs: vec![],
+        };
+        pg.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(1), &trg.block.header.hash.unwrap()],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        let from = index(&trg, &mut pg, &params).await;
+        assert!(from.is_err());
+
+        let rid1 = (
+            FixedBytes::<20>::with_last_byte(0x01),
+            B256::with_last_byte(0x01),
+            B256::with_last_byte(0x01).to_vec(),
+        );
+        let rid2 = (
+            FixedBytes::<20>::with_last_byte(0x01),
+            B256::with_last_byte(0x01),
+            B256::with_last_byte(0x02).to_vec(),
+        );
+        let mut ids = HashSet::new();
+        ids.insert(rid1.clone());
+        ids.insert(rid2.clone());
+
+        // some wild pending logs appear. Notice they point to the pending block 2.
+        trg.logs = vec![
+            sr(test_block(2, 0, 1), 1, rid1.clone()),
+            ss(
+                test_block(2, 0, 1),
+                2,
+                rid1.clone(),
+                0,
+                Bytes::copy_from_slice(&B256::repeat_byte(0x1)[..]),
+            ),
+            dr(test_block(2, 0, 1), 3, rid1.clone()),
+        ];
+
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 1);
+
+        {
+            let pgtx = pg.transaction().await.expect("opening index tx");
+            let recs = Record::load(&pgtx, ids.clone())
+                .await
+                .expect("loading records");
+            let rec = recs.get(&rid1).expect("finding record");
+            assert_eq!(rec.static_data, &[0u8; 0]);
+
+            // calling next to index now should return the correct log index.
+            let next_range = next_to_index(&pgtx, &trg, &params).await.unwrap();
+            if let NextRange::Pending {
+                num,
+                latest,
+                log_index,
+            } = next_range
+            {
+                assert_eq!(num, 2);
+                assert_eq!(latest.num, 1);
+                assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+                assert_eq!(log_index, Some(3));
+            } else {
+                panic!("expected pending range");
+            }
+        }
+
+        // the new canonical block is now available.
+        trg.logs = vec![];
+        trg.block = test_block(2, 2, 1);
+        {
+            // next_to_index should be the latest block with log_index offset.
+            let pgtx = pg.transaction().await.expect("opening index tx");
+            let next_range = next_to_index(&pgtx, &trg, &params).await.unwrap();
+            if let NextRange::Pending {
+                num,
+                latest,
+                log_index,
+            } = next_range
+            {
+                assert_eq!(num, 2);
+                assert_eq!(latest.num, 2);
+                assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+                assert_eq!(log_index, Some(3));
+            } else {
+                panic!("expected pending range");
+            }
+        }
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 2);
+
+        trg.logs = vec![sr(test_block(3, 0, 2), 1, rid2.clone())];
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 2);
+
+        trg.logs = vec![ss(
+            test_block(3, 0, 2),
+            2,
+            rid2.clone(),
+            0,
+            Bytes::copy_from_slice(&B256::repeat_byte(0x1)[..]),
+        )];
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 2);
+
+        trg.logs = vec![dr(test_block(3, 0, 2), 3, rid2.clone())];
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 2);
+
+        trg.block = test_block(6, 6, 5);
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 3);
     }
 
     #[tokio::test]
@@ -969,9 +1246,125 @@ mod tests {
             block: test_block(10, 10, 9),
             logs: vec![],
         };
-        let next_range = next_to_index(&pgtx, &trg, 10, 1).await.unwrap();
-        assert_eq!(next_range.from.num, 1);
-        assert_eq!(next_range.to.num, 10);
+        let params = IndexParams {
+            batch_size: 10,
+            max_reorg: 1,
+            enable_wiresaw: true,
+        };
+        let next_range = next_to_index(&pgtx, &trg, &params).await.unwrap();
+        if let NextRange::Canonical { from, to } = next_range {
+            assert_eq!(from.num, 1);
+            assert_eq!(to.num, 10);
+        } else {
+            panic!("expected canonical range");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_next_to_index_pending() {
+        logging();
+        let (_pg_server, mut pg) = test_pg().await;
+
+        let mut trg = TestGetRemote {
+            block: test_block(1, 1, 0),
+            logs: vec![],
+        };
+
+        // 1. latest block is fully indexed, we can increment to pending.
+        let pgtx = pg.transaction().await.expect("opening index tx");
+        pgtx.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(1), &trg.block.header.hash.unwrap()],
+        )
+        .await
+        .expect("setting up blocks table");
+
+        let params = IndexParams {
+            batch_size: 10,
+            max_reorg: 1,
+            enable_wiresaw: true,
+        };
+        let next_range = next_to_index(&pgtx, &trg, &params).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 2);
+            assert_eq!(latest.num, 1);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+        } else {
+            panic!("expected pending range");
+        }
+
+        // 2. keep polling pending logs.
+        pgtx.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(2), &B256::ZERO],
+        )
+        .await
+        .expect("setting up blocks table");
+        let next_range = next_to_index(&pgtx, &trg, &params).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 2);
+            assert_eq!(latest.num, 1);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+        } else {
+            panic!("expected pending range");
+        }
+
+        // 3. Latest block has caught up, last poll on latest.
+        trg.block = test_block(2, 2, 1);
+        let next_range = next_to_index(&pgtx, &trg, &params).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 2);
+            assert_eq!(latest.num, 2);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+
+            // override pending block with correct block ref.
+            const Q: &str = "
+                INSERT INTO blocks(num, hash) 
+                VALUES ($1, $2)
+                ON CONFLICT (num) 
+                DO UPDATE 
+                SET hash = EXCLUDED.hash
+            ";
+            pgtx.execute(Q, &[&U64::from(latest.num), &latest.hash])
+                .await
+                .expect("setting up blocks table");
+        } else {
+            panic!("expected pending range");
+        }
+
+        // 4. Moving on to next pending block
+        let next_range = next_to_index(&pgtx, &trg, &params).await.unwrap();
+        if let NextRange::Pending {
+            num,
+            latest,
+            log_index,
+        } = next_range
+        {
+            assert_eq!(num, 3);
+            assert_eq!(latest.num, 2);
+            assert_eq!(latest.hash, trg.block.header.hash.unwrap());
+            assert_eq!(log_index, None);
+        } else {
+            panic!("expected pending range");
+        }
     }
 
     #[tokio::test]
@@ -1008,7 +1401,13 @@ mod tests {
             block: test_block(2, 2, 1),
             logs: vec![],
         };
-        next_to_index(&pgtx, &trg, 2, 2).await.unwrap();
+
+        let params = IndexParams {
+            batch_size: 2,
+            max_reorg: 2,
+            enable_wiresaw: true,
+        };
+        next_to_index(&pgtx, &trg, &params).await.unwrap();
 
         let rows = pgtx
             .query("select num, hash from blocks order by num desc", &[])
