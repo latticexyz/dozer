@@ -225,6 +225,7 @@ impl EthApi for ReqwestProvider {
             .raw_request("wiresaw_getLogs".into(), &(&f, &log_index))
             .await
             .map_err(|e| IndexError::Retry(eyre::eyre!("logs {}", e)))?;
+        tracing::Span::current().record("logs", logs.len());
         Ok(logs)
     }
 }
@@ -261,7 +262,7 @@ impl IndexParams {
     }
 }
 
-#[tracing::instrument(fields(local, remote, removed) skip_all)]
+#[tracing::instrument(fields(local, remote, removed, pending, log_index) skip_all)]
 async fn next_to_index<F: EthApi>(
     pgtx: &Transaction<'_>,
     remote: &F,
@@ -302,6 +303,9 @@ async fn next_to_index<F: EthApi>(
                         get_log_idx(pgtx, local_num).await.ok().map(|i| i.to()),
                     )
                 };
+            tracing::Span::current()
+                .record("pending", num)
+                .record("log_index", log_index);
             return Ok(NextRange::Pending {
                 num,
                 latest: NumHash {
@@ -342,17 +346,16 @@ async fn next_to_index<F: EthApi>(
             )
             .await?;
             pgtx.execute(
-                "delete from records where block_num >= $1",
-                &[&U64::from(local_num)],
-            )
-            .await?;
-            pgtx.execute(
                 "
-                with latest as (
-                    select max(block_num) as block_num, address, table_id, key
+                 with deleted as (
+	            delete from records where block_num >= $1
+	            returning address, table_id, key
+                ),
+                latest as (
+  	            select max(block_num) as block_num, address, table_id, key
                     from records
                     where expired
-                    and block_num >= $1
+	            and (address, table_id, key) in (select address, table_id, key from deleted)
                     group by address, table_id, key
                 )
                 update records r set expired = false
@@ -360,10 +363,7 @@ async fn next_to_index<F: EthApi>(
                 where (r.address, r.table_id, r.key) = (latest.address, latest.table_id, latest.key)
                 and r.block_num = latest.block_num
                 ",
-                &[&U64::from(cmp::max(
-                    local_num as i64 - params.max_reorg as i64,
-                    0,
-                ))],
+                &[&U64::from(local_num)],
             )
             .await?;
             removed += 1;
@@ -1113,18 +1113,22 @@ mod tests {
         .await
         .expect("setting up blocks table");
 
-        let from = index(&trg, &mut pg, &params)
-            .await
-            .expect("unable to index");
-        assert_eq!(from, 1);
+        let from = index(&trg, &mut pg, &params).await;
+        assert!(from.is_err());
 
         let rid1 = (
             FixedBytes::<20>::with_last_byte(0x01),
             B256::with_last_byte(0x01),
             B256::with_last_byte(0x01).to_vec(),
         );
+        let rid2 = (
+            FixedBytes::<20>::with_last_byte(0x01),
+            B256::with_last_byte(0x01),
+            B256::with_last_byte(0x02).to_vec(),
+        );
         let mut ids = HashSet::new();
         ids.insert(rid1.clone());
+        ids.insert(rid2.clone());
 
         // some wild pending logs appear. Notice they point to the pending block 2.
         trg.logs = vec![
@@ -1194,6 +1198,36 @@ mod tests {
             .await
             .expect("unable to index");
         assert_eq!(from, 2);
+
+        trg.logs = vec![sr(test_block(3, 0, 2), 1, rid2.clone())];
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 2);
+
+        trg.logs = vec![ss(
+            test_block(3, 0, 2),
+            2,
+            rid2.clone(),
+            0,
+            Bytes::copy_from_slice(&B256::repeat_byte(0x1)[..]),
+        )];
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 2);
+
+        trg.logs = vec![dr(test_block(3, 0, 2), 3, rid2.clone())];
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 2);
+
+        trg.block = test_block(6, 6, 5);
+        let from = index(&trg, &mut pg, &params)
+            .await
+            .expect("unable to index");
+        assert_eq!(from, 3);
     }
 
     #[tokio::test]
