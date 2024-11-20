@@ -122,7 +122,6 @@ pub async fn handle_sse(
                 .json_data(resp.0)
                 .expect("unable to seralize json"));
             rx.recv().await.expect("unable to receive new block update");
-            tracing::info!("new block update received");
             req.block_num = Some(last_block + 1);
         }
     };
