@@ -257,6 +257,9 @@ mod field {
         pub fn key_sql(&self, pos: usize, name: &str) -> Result<String, api::Error> {
             match self {
                 Kind::Static(t) => match t {
+                    Static::Num(_, Desc::Int) => {
+                        Ok(format!("b2sn(sdec(key, {}, 32)) as {}", 32 * pos, name))
+                    }
                     Static::Num(_, _) => {
                         Ok(format!("b2n(sdec(key, {}, 32)) as {}", 32 * pos, name))
                     }
@@ -355,6 +358,14 @@ mod field {
         }
         #[test]
         fn test_to_sql() {
+            assert_eq!(
+                Kind::Static(Static::Num(32, Desc::Uint)).key_sql(0, "id").unwrap(),
+                "b2n(sdec(key, 0, 32)) as id"
+            );
+            assert_eq!(
+                Kind::Static(Static::Num(32, Desc::Int)).key_sql(0, "id").unwrap(),
+                "b2sn(sdec(key, 0, 32)) as id"
+            );
             assert_eq!(
                 Kind::Static(Static::Num(32, Desc::Uint)).val_sql(1, "foo"),
                 "b2n(sdec(static_data, 1, 32)) as foo"
