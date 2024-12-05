@@ -343,6 +343,11 @@ mod tests {
                 None,
             ),
             (
+                vec![test_schema("foo", vec!["c"])],
+                "select c from foo where c = -42 or c = 42",
+                None,
+            ),
+            (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
                 "select foo.c, bar.c from foo, bar where foo.c = bar.c",
                 None,
