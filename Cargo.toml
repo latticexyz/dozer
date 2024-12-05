@@ -30,6 +30,7 @@ metrics-tracing-context = "0.16"
 metrics-util = "0.17"
 openssl = "0.10.64"
 postgres-openssl = "0.5"
+regex = "1.11.1"
 reqwest = { version = "0.12.4", features = ["gzip", "json"] }
 ruint = { version = "1.12.1", features = ["postgres"] }
 serde = { version = "1", features = ["derive"] }
