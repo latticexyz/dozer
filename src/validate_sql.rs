@@ -141,6 +141,7 @@ impl Validator {
             ast::Expr::IsNotTrue(_) => Ok(()),
             ast::Expr::IsNull(_) => Ok(()),
             ast::Expr::IsNotNull(_) => Ok(()),
+            ast::Expr::UnaryOp { op: _, expr: _ } => Ok(()),
             ast::Expr::Ceil { expr, field: _ } => self.validate_expression(expr),
             ast::Expr::Floor { expr, field: _ } => self.validate_expression(expr),
             ast::Expr::Value(_) => Ok(()),
@@ -339,6 +340,11 @@ mod tests {
             (
                 vec![test_schema("foo", vec!["c"])],
                 "select c from foo where c in ('foo', 'bar')",
+                None,
+            ),
+            (
+                vec![test_schema("foo", vec!["c"])],
+                "select c from foo where c = 42 or c = -42",
                 None,
             ),
             (
