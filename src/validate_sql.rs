@@ -349,6 +349,11 @@ mod tests {
                 None,
             ),
             (
+                vec![test_schema("foo", vec!["c"])],
+                "select count(*) from foo",
+                None,
+            ),
+            (
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
                 "select foo.c, bar.c from foo, bar where foo.c = bar.c",
                 None,
