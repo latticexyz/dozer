@@ -142,6 +142,7 @@ impl Validator {
             ast::Expr::IsNull(_) => Ok(()),
             ast::Expr::IsNotNull(_) => Ok(()),
             ast::Expr::UnaryOp { op: _, expr: _ } => Ok(()),
+            ast::Expr::Function(_) => Ok(()),
             ast::Expr::Ceil { expr, field: _ } => self.validate_expression(expr),
             ast::Expr::Floor { expr, field: _ } => self.validate_expression(expr),
             ast::Expr::Value(_) => Ok(()),
