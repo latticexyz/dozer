@@ -6,6 +6,7 @@ mod backup;
 mod indexer;
 mod mud_encoding;
 mod mud_schema;
+mod preformat_sql;
 mod reindex;
 mod s256;
 mod validate_sql;
@@ -55,7 +56,7 @@ struct ServerArgs {
     #[arg(long, env = "PG_URL", default_value = "postgres://localhost/dozer")]
     pg_url: String,
 
-    #[arg(long, env = "ETH_URL", default_value = "https://rpc.redstonechain.com")]
+    #[arg(long, env = "ETH_URL", default_value = "http://127.0.0.1:8545")]
     eth_url: Url,
 
     #[arg(long, env = "RO_PASSWORD")]

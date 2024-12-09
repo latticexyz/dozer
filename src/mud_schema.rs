@@ -359,11 +359,15 @@ mod field {
         #[test]
         fn test_to_sql() {
             assert_eq!(
-                Kind::Static(Static::Num(32, Desc::Uint)).key_sql(0, "id").unwrap(),
+                Kind::Static(Static::Num(32, Desc::Uint))
+                    .key_sql(0, "id")
+                    .unwrap(),
                 "b2n(sdec(key, 0, 32)) as id"
             );
             assert_eq!(
-                Kind::Static(Static::Num(32, Desc::Int)).key_sql(0, "id").unwrap(),
+                Kind::Static(Static::Num(32, Desc::Int))
+                    .key_sql(0, "id")
+                    .unwrap(),
                 "b2sn(sdec(key, 0, 32)) as id"
             );
             assert_eq!(

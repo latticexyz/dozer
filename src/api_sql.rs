@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 
-use crate::{api, mud_schema, s256};
+use crate::{api, mud_schema, preformat_sql, s256};
 
 use alloy::{
     hex,
@@ -18,7 +18,6 @@ use axum_extra::extract::Form;
 use eyre::{Context, Result};
 use futures::Stream;
 use itertools::Itertools;
-use regex::Regex;
 use ruint::aliases::{U256, U64};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -72,15 +71,10 @@ pub async fn handle(
         .wrap_err("starting sql api read tx")?;
     let mut res: Vec<Rows> = Vec::new();
     for r in req {
-        let re = Regex::new(r"'0x[0-9a-fA-F]+'").unwrap();
-        let decoded_query = re.replace_all(&r.query, |caps: &regex::Captures| {
-            let hex_value = &caps[0];
-            let clean_hex = &hex_value[3..hex_value.len() - 1];
-            format!("decode('{}', 'hex')", clean_hex)
-        });
-
+        let preformatted_query = preformat_sql::preformat(&r.query);
         let query =
-            mud_schema::query::enhance(&pgtx, r.address, r.block_height, &decoded_query).await?;
+            mud_schema::query::enhance(&pgtx, r.address, r.block_height, &preformatted_query)
+                .await?;
 
         res.push(handle_rows(pgtx.query(&dbg!(query), &[]).await?)?);
     }
