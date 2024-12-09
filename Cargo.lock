@@ -1788,7 +1788,6 @@ dependencies = [
  "openssl",
  "postgres-openssl",
  "postgresql_embedded",
- "regex",
  "reqwest",
  "ruint",
  "serde",
