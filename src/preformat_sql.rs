@@ -47,3 +47,31 @@ fn modify_binary_op(ident: &mut Expr) {
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_preformat() {
+        assert_eq!(
+            preformat("SELECT column_1 FROM table_1 WHERE column_1 = '123'"),
+            "SELECT column_1 FROM table_1 WHERE column_1 = '123'"
+        );
+
+        assert_eq!(
+            preformat("SELECT \"0xcolumn_1\" FROM table_1 WHERE column_1 = '123'"),
+            "SELECT \"0xcolumn_1\" FROM table_1 WHERE column_1 = '123'"
+        );
+
+        assert_eq!(
+            preformat("SELECT column_1 FROM table_1 WHERE column_1 = '0x1234'"),
+            "SELECT column_1 FROM table_1 WHERE column_1 = decode('1234', 'hex')"
+        );
+
+        assert_eq!(
+            preformat("SELECT column_1 FROM table_1 WHERE column_1 = \"0x1234\""),
+            "SELECT column_1 FROM table_1 WHERE column_1 = decode('1234', 'hex')"
+        );
+    }
+}
