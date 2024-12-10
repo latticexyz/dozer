@@ -142,7 +142,7 @@ impl Validator {
             ast::Expr::IsNull(_) => Ok(()),
             ast::Expr::IsNotNull(_) => Ok(()),
             ast::Expr::UnaryOp { .. } => Ok(()),
-            ast::Expr::Function(_) => Ok(()),
+            ast::Expr::Function(function) => self.validate_function(function),
             ast::Expr::Ceil { expr, field: _ } => self.validate_expression(expr),
             ast::Expr::Floor { expr, field: _ } => self.validate_expression(expr),
             ast::Expr::Value(_) => Ok(()),
@@ -262,6 +262,53 @@ impl Validator {
             _ => no!(tbl_with_joins.relation),
         }
     }
+
+    fn validate_function(&mut self, function: &ast::Function) -> Result<(), api::Error> {
+        let name = function.name.to_string();
+        const VALID_FUNCS: [&str; 30] = [
+            "decode",
+            // Aggregate Functions
+            "count",
+            "sum",
+            "avg",
+            "min",
+            "max",
+            "array_agg",
+            "string_agg",
+            // String Functions
+            "concat",
+            "concat_ws",
+            "lower",
+            "upper",
+            "trim",
+            "replace",
+            "substring",
+            "length",
+            "split_part",
+            // Date/Time Functions
+            "now",
+            "current_timestamp",
+            "current_date",
+            "date_trunc",
+            "extract",
+            "to_timestamp",
+            "age",
+            "date_part",
+            // Type Conversion/Null Handling
+            "cast",
+            "to_char",
+            "coalesce",
+            "nullif",
+            // Math Functions
+            "round",
+        ];
+
+        if !VALID_FUNCS.contains(&name.as_str()) {
+            return no!(format!("function {}", name));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -363,6 +410,11 @@ mod tests {
                 "select \"exists\" from foo",
                 None,
             ),
+            (
+                vec![test_schema("foo", vec!["c"])],
+                "select count(*) from foo",
+                None,
+            ),
         ]
         .into_iter()
         .for_each(|c| check_query(c.0, c.1, c.2))
@@ -415,6 +467,11 @@ mod tests {
                 vec![test_schema("foo", vec!["c"]), test_schema("bar", vec!["c"])],
                 "select foo.c, bar.c, baz.d from foo, bar",
                 Some("table baz not defined in query"),
+            ),
+            (
+                vec![test_schema("foo", vec!["c"])],
+                "select any('123') from foo",
+                Some("function any not supported"),
             ),
         ]
         .into_iter()
