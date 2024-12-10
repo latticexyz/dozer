@@ -24,15 +24,6 @@ pub fn preformat(query: &str) -> String {
 
 fn modify_binary_op(ident: &mut Expr) {
     match ident {
-        Expr::Identifier(ident) => {
-            if ident.value.starts_with("0x") {
-                let hex_value = &ident.value[2..];
-                *ident = sqlparser::ast::Ident {
-                    value: format!("decode('{}', 'hex')", hex_value),
-                    quote_style: None,
-                };
-            }
-        }
         Expr::Value(value) => {
             if let AstValue::SingleQuotedString(s) = value {
                 if s.starts_with("0x") {
@@ -65,12 +56,12 @@ mod tests {
         );
 
         assert_eq!(
-            preformat("SELECT column_1 FROM table_1 WHERE column_1 = '0x1234'"),
-            "SELECT column_1 FROM table_1 WHERE column_1 = decode('1234', 'hex')"
+            preformat("SELECT column_1 FROM table_1 WHERE column_1 = \"0x1234\""),
+            "SELECT column_1 FROM table_1 WHERE column_1 = \"0x1234\""
         );
 
         assert_eq!(
-            preformat("SELECT column_1 FROM table_1 WHERE column_1 = \"0x1234\""),
+            preformat("SELECT column_1 FROM table_1 WHERE column_1 = '0x1234'"),
             "SELECT column_1 FROM table_1 WHERE column_1 = decode('1234', 'hex')"
         );
     }
