@@ -51,8 +51,8 @@ mod tests {
         );
 
         assert_eq!(
-            preformat("SELECT \"0xcolumn_1\" FROM table_1 WHERE column_1 = '123'"),
-            "SELECT \"0xcolumn_1\" FROM table_1 WHERE column_1 = '123'"
+            preformat("SELECT \"0xcolumn_1\" FROM table_1 WHERE \"0xcolumn_1\" = '123'"),
+            "SELECT \"0xcolumn_1\" FROM table_1 WHERE \"0xcolumn_1\" = '123'"
         );
 
         assert_eq!(
