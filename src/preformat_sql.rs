@@ -9,12 +9,8 @@ const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
 pub fn preformat(query: &str) -> String {
     let mut ast = Parser::parse_sql(PG, query).unwrap();
     visit_expressions_mut(&mut ast, |expr| {
-        if let Expr::BinaryOp {
-            left: _,
-            right,
-            op: _,
-        } = expr
-        {
+        if let Expr::BinaryOp { left, right, op: _ } = expr {
+            modify_binary_op(left);
             modify_binary_op(right);
         }
         ControlFlow::<()>::Continue(())
@@ -63,6 +59,11 @@ mod tests {
         assert_eq!(
             preformat("SELECT column_1 FROM table_1 WHERE column_1 = '0x1234'"),
             "SELECT column_1 FROM table_1 WHERE column_1 = decode('1234', 'hex')"
+        );
+
+        assert_eq!(
+            preformat("SELECT column_1 FROM table_1 WHERE '0x1234' = column_1"),
+            "SELECT column_1 FROM table_1 WHERE decode('1234', 'hex') = column_1"
         );
     }
 }
