@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 
-use crate::{api, mud_schema, s256};
+use crate::{api, mud_schema, preformat_sql, s256};
 
 use alloy::{
     hex,
@@ -71,7 +71,11 @@ pub async fn handle(
         .wrap_err("starting sql api read tx")?;
     let mut res: Vec<Rows> = Vec::new();
     for r in req {
-        let query = mud_schema::query::enhance(&pgtx, r.address, r.block_height, &r.query).await?;
+        let preformatted_query = preformat_sql::preformat(&r.query);
+        let query =
+            mud_schema::query::enhance(&pgtx, r.address, r.block_height, &preformatted_query)
+                .await?;
+
         res.push(handle_rows(pgtx.query(&dbg!(query), &[]).await?)?);
     }
     Ok(Json(Response {
