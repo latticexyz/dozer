@@ -83,6 +83,7 @@ pub mod query {
     mod tests {
         use super::*;
         use crate::mud_schema::encode_resource_id;
+        use crate::preformat_sql;
         use alloy::primitives::{fixed_bytes, FixedBytes};
 
         fn fmt_sql(sql: &str) -> Result<String> {
@@ -109,44 +110,82 @@ pub mod query {
 
         #[test]
         fn test_enhance() {
+            let user_query =
+                "select \"foo\".value, \"bar\".value from \"foo\",\"bar\" where \"foo\".value = \"bar\".value";
+            let preformatted_query = preformat_sql::preformat(user_query);
             let pq = build_sql(
                 None,
-                "select foo.value, bar.value from foo,bar where foo.value = bar.value",
+                &preformatted_query,
                 vec![test_schema("foo", "value"), test_schema("bar", "value")],
             );
+
             assert_eq!(
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
-                    with bar as (
+                    with "bar" as (
                         select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
                         and not expired
                         and not deleted
-                    ), foo as (
+                    ), "foo" as (
                         select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
                         and not expired
                         and not deleted
-                    ) select foo.value, bar.value from foo,bar where foo.value = bar.value
+                    ) select "foo".value, "bar".value from "foo","bar" where "foo".value = "bar".value
+                "#).unwrap()
+            )
+        }
+
+        #[test]
+        fn test_enhance_unquoted() {
+            let user_query = "select foo.value, bar.value from foo,bar where foo.value = bar.value";
+            let preformatted_query = preformat_sql::preformat(user_query);
+            let pq = build_sql(
+                None,
+                &preformatted_query,
+                vec![test_schema("foo", "value"), test_schema("bar", "value")],
+            );
+
+            assert_eq!(
+                fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
+                fmt_sql(r#"
+                    with "bar" as (
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        from records
+                        where address = '\x0000000000000000000000000000000000000000'
+                        and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
+                        and not expired
+                        and not deleted
+                    ), "foo" as (
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        from records
+                        where address = '\x0000000000000000000000000000000000000000'
+                        and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
+                        and not expired
+                        and not deleted
+                    ) select foo.value, bar.value from "foo","bar" where foo.value = bar.value
                 "#).unwrap()
             )
         }
 
         #[test]
         fn test_enhance_block_height() {
+            let user_query = "select value from foo";
+            let preformatted_query = preformat_sql::preformat(user_query);
             let pq = build_sql(
                 Some(42),
-                "select value from foo",
+                &preformatted_query,
                 vec![test_schema("foo", "value")],
             );
             assert_eq!(
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
-                    with foo as (
+                    with "foo" as (
                         select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
@@ -154,7 +193,7 @@ pub mod query {
                         and not expired
                         and not deleted
                         and block_num >= 42
-                    ) select value from foo
+                    ) select value from "foo"
                 "#).unwrap()
             )
         }
@@ -421,6 +460,7 @@ mod field {
 
 fn encode_resource_id(name: &str) -> FixedBytes<30> {
     let name = name.strip_prefix("__").unwrap_or(name);
+    let name = name.trim_matches('"');
     let (mut id, parts) = (FixedBytes::<30>::ZERO, name.split("__").collect_vec());
     match parts.len() {
         1 => {
@@ -633,7 +673,7 @@ impl Schema {
 
     pub fn cte_sql(&self, block_height: Option<u64>) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
-        res.push(format!("{} as (", self.full_name()));
+        res.push(format!("\"{}\" as (", self.full_name()));
         res.push("select".to_string());
         if let Some(sl) = &self.select_list {
             res.push(
