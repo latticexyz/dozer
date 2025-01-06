@@ -604,13 +604,13 @@ impl Schema {
     }
 
     fn namespace(&self) -> String {
-        String::from_utf8(self.table_id[2..15].to_vec())
+        String::from_utf8(self.table_id[2..16].to_vec())
             .expect("unable to utf8 decode namespace")
             .replace('\0', "")
     }
 
     fn name(&self) -> String {
-        String::from_utf8(self.table_id[15..32].to_vec())
+        String::from_utf8(self.table_id[16..32].to_vec())
             .expect("unable to utf8 decode table name")
             .replace('\0', "")
     }
