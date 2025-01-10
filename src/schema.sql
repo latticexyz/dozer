@@ -1,14 +1,23 @@
 create extension if not exists pg_stat_statements;
 
-
+-- create or replace function sdecNonNull(data bytea, i int, n int)
+-- returns bytea as $$
+-- begin
+--     if data is null then
+--         return decode(repeat('00', n), 'hex');  -- Return n bytes of zeros
+--     elseif i + n - 1 > length(data) then
+--         return decode(repeat('00', n), 'hex');  -- Return n bytes of zeros here too
+--     end if;
+--     return substring(data from i+1 for n);  -- substring is 1-index
+-- end;
 
 create or replace function sdec(data bytea, i int, n int)
 returns bytea as $$
 begin
     if data is null then
-        return decode(repeat('00', n), 'hex');  -- Return n bytes of zeros
+        return null;
     elseif i + n - 1 > length(data) then
-        return decode(repeat('00', n), 'hex');  -- Return n bytes of zeros here too
+        return null;
     end if;
     return substring(data from i+1 for n);  -- substring is 1-index
 end;
@@ -173,27 +182,3 @@ begin
     RETURN substring(dynamic_data FROM field_start FOR field_length);
 end;
 $$ language plpgsql immutable parallel safe cost 1;
-
-create or replace function rpad(input bytea, length int, fill bytea default '\x00')
-returns bytea as $$
-declare
-    current_length int;
-    fill_byte text;
-begin
-    if input is null then
-        return null;
-    end if;
-
-    if length(fill) != 1 then
-        raise exception 'fill parameter must be exactly 1 byte';
-    end if;
-
-    current_length := length(input);
-    if current_length >= length then
-        return input;
-    end if;
-
-    fill_byte := encode(fill, 'hex');
-    return input || decode(repeat(fill_byte, length - current_length), 'hex');
-end;
-$$ language plpgsql strict immutable parallel safe cost 1;

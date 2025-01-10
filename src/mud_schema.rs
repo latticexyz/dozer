@@ -279,26 +279,26 @@ mod field {
                 Kind::Static(t) => match t {
                     Static::Num(size, Desc::Int) => {
                         format!(
-                            "b2sn(sdec(rpad(static_data, {}, '\\x00'), {}, {})) as {}",
-                            padding, pos, size, name
+                            "b2sn(coalesce(sdec(static_data, {}, {}), '\\x00')) as {}",
+                            pos, size, name
                         )
                     }
                     Static::Num(size, _) => {
                         format!(
-                            "b2n(sdec(rpad(static_data, {}, '\\x00'), {}, {})) as {}",
-                            padding, pos, size, name
+                            "b2n(coalesce(sdec(static_data, {}, {}), '\\x00')) as {}",
+                            pos, size, name
                         )
                     }
                     Static::Bytea(_, Desc::Bool) => {
                         format!(
-                            "get_byte(rpad(static_data, {}, '\\x00'), {}) = 1 as {}",
-                            padding, pos, name
+                            "coalesce(get_byte(static_data, {}), 0) = 1 as {}",
+                            pos, name
                         )
                     }
                     Static::Bytea(size, _) => {
                         format!(
-                            "sdec(rpad(static_data, {}, '\\x00'), {}, {}) as {}",
-                            padding, pos, size, name
+                            "sdec(coalesce(static_data, '\\x00'), {}, {}) as {}",
+                            pos, size, name
                         )
                     }
                 },
@@ -685,7 +685,7 @@ impl Schema {
                 .sum(),
             field::Kind::Dynamic(_) => pos - self.num_static(),
         };
-        Ok(schema_type.val_sql(pos, name, 64))
+        Ok(schema_type.val_sql(pos, name, 32 * 28))
     }
 }
 
