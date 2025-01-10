@@ -6,9 +6,9 @@ create or replace function sdec(data bytea, i int, n int)
 returns bytea as $$
 begin
     if data is null then
-        return null;
+        return decode(repeat('00', n), 'hex');  -- Return n bytes of zeros
     elseif i + n - 1 > length(data) then
-        return null;
+        return decode(repeat('00', n), 'hex');  -- Return n bytes of zeros here too
     end if;
     return substring(data from i+1 for n);  -- substring is 1-index
 end;
