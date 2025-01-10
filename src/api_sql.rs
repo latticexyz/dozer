@@ -70,6 +70,7 @@ pub async fn handle(
         .await
         .wrap_err("starting sql api read tx")?;
     let mut res: Vec<Rows> = Vec::new();
+    let start = std::time::Instant::now();
     for r in req {
         let preformatted_query = preformat_sql::preformat(&r.query);
         let query =
@@ -78,6 +79,7 @@ pub async fn handle(
 
         res.push(handle_rows(pgtx.query(&dbg!(query), &[]).await?)?);
     }
+    println!("Query loop took: {:?}", start.elapsed());
     Ok(Json(Response {
         block_height: pgtx
             .query_one("select max(num)::text from blocks", &[])
