@@ -89,6 +89,8 @@ pub async fn handle(
 }
 
 fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
+    println!("rows: {:?}", rows);
+
     let mut result: Rows = Vec::new();
     if let Some(first) = rows.first() {
         result.push(
@@ -99,9 +101,15 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
                 .collect(),
         );
     }
+    println!("result: {:?}", result);
+
     for row in rows {
         let mut json_row: Vec<Value> = Vec::new();
+        println!("row: {:?}", row);
+
         for (idx, column) in row.columns().iter().enumerate() {
+            println!("column: {:?}", column.type_());
+
             let value = match *column.type_() {
                 Type::BOOL => {
                     let b: Option<bool> = row.get(idx);
@@ -111,6 +119,8 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
                     }
                 }
                 Type::NUMERIC => {
+                    println!("row: {:?}", row);
+
                     let s: Option<s256::Int> = row.get(idx);
                     match s {
                         Some(val) => Value::String(val.to_string()),

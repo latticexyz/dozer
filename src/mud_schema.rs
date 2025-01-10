@@ -278,16 +278,28 @@ mod field {
             match self {
                 Kind::Static(t) => match t {
                     Static::Num(size, Desc::Int) => {
-                        format!("b2sn(sdec(static_data, {}, {})) as {}", pos, size, name)
+                        format!(
+                            "b2sn(sdec(rpad(static_data, 64, '\\x00'), {}, {})) as {}",
+                            pos, size, name
+                        )
                     }
                     Static::Num(size, _) => {
-                        format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
+                        format!(
+                            "b2n(sdec(rpad(static_data, 64, '\\x00'), {}, {})) as {}",
+                            pos, size, name
+                        )
                     }
                     Static::Bytea(_, Desc::Bool) => {
-                        format!("get_byte(static_data, {}) = 1 as {}", pos, name)
+                        format!(
+                            "get_byte(rpad(static_data, 64, '\\x00'), {}) = 1 as {}",
+                            pos, name
+                        )
                     }
                     Static::Bytea(size, _) => {
-                        format!("sdec(static_data, {}, {}) as {}", pos, size, name)
+                        format!(
+                            "sdec(rpad(static_data, 64, '\\x00'), {}, {}) as {}",
+                            pos, size, name
+                        )
                     }
                 },
                 Kind::Dynamic(t) => match t {
