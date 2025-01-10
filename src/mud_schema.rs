@@ -274,31 +274,31 @@ mod field {
             }
         }
 
-        pub fn val_sql(&self, pos: usize, name: &str) -> String {
+        pub fn val_sql(&self, pos: usize, name: &str, padding: usize) -> String {
             match self {
                 Kind::Static(t) => match t {
                     Static::Num(size, Desc::Int) => {
                         format!(
-                            "b2sn(sdec(rpad(static_data, 64, '\\x00'), {}, {})) as {}",
-                            pos, size, name
+                            "b2sn(sdec(rpad(static_data, {}, '\\x00'), {}, {})) as {}",
+                            padding, pos, size, name
                         )
                     }
                     Static::Num(size, _) => {
                         format!(
-                            "b2n(sdec(rpad(static_data, 64, '\\x00'), {}, {})) as {}",
-                            pos, size, name
+                            "b2n(sdec(rpad(static_data, {}, '\\x00'), {}, {})) as {}",
+                            padding, pos, size, name
                         )
                     }
                     Static::Bytea(_, Desc::Bool) => {
                         format!(
-                            "get_byte(rpad(static_data, 64, '\\x00'), {}) = 1 as {}",
-                            pos, name
+                            "get_byte(rpad(static_data, {}, '\\x00'), {}) = 1 as {}",
+                            padding, pos, name
                         )
                     }
                     Static::Bytea(size, _) => {
                         format!(
-                            "sdec(rpad(static_data, 64, '\\x00'), {}, {}) as {}",
-                            pos, size, name
+                            "sdec(rpad(static_data, {}, '\\x00'), {}, {}) as {}",
+                            padding, pos, size, name
                         )
                     }
                 },
@@ -383,27 +383,27 @@ mod field {
                 "b2sn(sdec(key, 0, 32)) as id"
             );
             assert_eq!(
-                Kind::Static(Static::Num(32, Desc::Uint)).val_sql(1, "foo"),
+                Kind::Static(Static::Num(32, Desc::Uint)).val_sql(1, "foo", 64),
                 "b2n(sdec(static_data, 1, 32)) as foo"
             );
             assert_eq!(
-                Kind::Static(Static::Bytea(32, Desc::Bytes)).val_sql(1, "foo"),
+                Kind::Static(Static::Bytea(32, Desc::Bytes)).val_sql(1, "foo", 64),
                 "sdec(static_data, 1, 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))).val_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))).val_sql(0, "foo", 64),
                 "b2ab(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))).val_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Array(Static::Num(32, Desc::Uint))).val_sql(0, "foo", 64),
                 "b2an(ddec(encoded_lengths, dynamic_data, 0), 32) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Bytea).val_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Bytea).val_sql(0, "foo", 64),
                 "ddec(encoded_lengths, dynamic_data, 0) as foo"
             );
             assert_eq!(
-                Kind::Dynamic(Dynamic::Text).val_sql(0, "foo"),
+                Kind::Dynamic(Dynamic::Text).val_sql(0, "foo", 64),
                 r#"convert_from(rtrim(ddec(encoded_lengths, dynamic_data, 0), '\x00'), 'UTF8') as foo"#
             );
         }
@@ -685,7 +685,7 @@ impl Schema {
                 .sum(),
             field::Kind::Dynamic(_) => pos - self.num_static(),
         };
-        Ok(schema_type.val_sql(pos, name))
+        Ok(schema_type.val_sql(pos, name, 64))
     }
 }
 
