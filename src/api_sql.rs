@@ -104,35 +104,59 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
         for (idx, column) in row.columns().iter().enumerate() {
             let value = match *column.type_() {
                 Type::BOOL => {
-                    let b: bool = row.get(idx);
-                    Value::Bool(b)
+                    let b: Option<bool> = row.get(idx);
+                    match b {
+                        Some(val) => Value::Bool(val),
+                        None => Value::Null,
+                    }
                 }
                 Type::NUMERIC => {
-                    let s: s256::Int = row.get(idx);
-                    Value::String(s.to_string())
+                    let s: Option<s256::Int> = row.get(idx);
+                    match s {
+                        Some(val) => Value::String(val.to_string()),
+                        None => Value::Null,
+                    }
                 }
                 Type::INT2 | Type::INT4 | Type::INT8 => {
-                    let n: i64 = row.get(idx);
-                    Value::Number(n.into())
+                    let n: Option<i64> = row.get(idx);
+                    match n {
+                        Some(val) => Value::Number(val.into()),
+                        None => Value::Null,
+                    }
                 }
                 Type::BYTEA => {
-                    let b: &[u8] = row.get(idx);
-                    Value::String(hex::encode_prefixed(b))
+                    let b: Option<&[u8]> = row.get(idx);
+                    match b {
+                        Some(val) => Value::String(hex::encode_prefixed(val)),
+                        None => Value::Null,
+                    }
                 }
                 Type::TEXT => {
-                    let s: String = row.get(idx);
-                    Value::String(s)
+                    let s: Option<String> = row.get(idx);
+                    match s {
+                        Some(val) => Value::String(val),
+                        None => Value::Null,
+                    }
                 }
                 Type::NUMERIC_ARRAY => {
-                    let nums: Vec<U256> = row.get(idx);
-                    serde_json::json!(nums.iter().map(|n| n.to_string()).collect::<Vec<String>>())
+                    let nums: Option<Vec<U256>> = row.get(idx);
+                    match nums {
+                        Some(val) => serde_json::json!(val
+                            .iter()
+                            .map(|n| n.to_string())
+                            .collect::<Vec<String>>()),
+                        None => Value::Null,
+                    }
                 }
                 Type::BYTEA_ARRAY => {
-                    let arrays: Vec<Vec<u8>> = row.get::<usize, Vec<Vec<u8>>>(idx);
-                    serde_json::json!(arrays
-                        .iter()
-                        .map(|array| Bytes::copy_from_slice(array))
-                        .collect_vec())
+                    let arrays: Option<Vec<Vec<u8>>> = row.get::<usize, Option<Vec<Vec<u8>>>>(idx);
+                    match arrays {
+                        Some(val) => serde_json::json!(val
+                            .iter()
+                            .map(|array| Bytes::copy_from_slice(array))
+                            .collect_vec()),
+                        None => Value::Null,
+                    }
                 }
                 _ => Value::Null,
             };
