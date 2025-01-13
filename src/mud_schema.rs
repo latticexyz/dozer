@@ -118,14 +118,14 @@ pub mod query {
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
                     with bar as (
-                        select b2n(sdec(static_data, 0, 4)) as value
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
                         and not expired
                         and not deleted
                     ), foo as (
-                        select b2n(sdec(static_data, 0, 4)) as value
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
@@ -147,7 +147,7 @@ pub mod query {
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
                     with foo as (
-                        select b2n(sdec(static_data, 0, 4)) as value
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
@@ -278,16 +278,28 @@ mod field {
             match self {
                 Kind::Static(t) => match t {
                     Static::Num(size, Desc::Int) => {
-                        format!("b2sn(sdec(static_data, {}, {})) as {}", pos, size, name)
+                        format!(
+                            "coalesce(b2sn(sdec(static_data, {}, {})), 0) as {}",
+                            pos, size, name
+                        )
                     }
                     Static::Num(size, _) => {
-                        format!("b2n(sdec(static_data, {}, {})) as {}", pos, size, name)
+                        format!(
+                            "coalesce(b2n(sdec(static_data, {}, {})), 0) as {}",
+                            pos, size, name
+                        )
                     }
                     Static::Bytea(_, Desc::Bool) => {
-                        format!("get_byte(static_data, {}) = 1 as {}", pos, name)
+                        format!(
+                            "coalesce(get_byte(static_data, {}), 0) = 1 as {}",
+                            pos, name
+                        )
                     }
                     Static::Bytea(size, _) => {
-                        format!("sdec(static_data, {}, {}) as {}", pos, size, name)
+                        format!(
+                            "coalesce(sdec(static_data, {}, {}), '\\x00') as {}",
+                            pos, size, name
+                        )
                     }
                 },
                 Kind::Dynamic(t) => match t {
@@ -372,11 +384,11 @@ mod field {
             );
             assert_eq!(
                 Kind::Static(Static::Num(32, Desc::Uint)).val_sql(1, "foo"),
-                "b2n(sdec(static_data, 1, 32)) as foo"
+                "coalesce(b2n(sdec(static_data, 1, 32)), 0) as foo"
             );
             assert_eq!(
                 Kind::Static(Static::Bytea(32, Desc::Bytes)).val_sql(1, "foo"),
-                "sdec(static_data, 1, 32) as foo"
+                "coalesce(sdec(static_data, 1, 32), '\\x00') as foo"
             );
             assert_eq!(
                 Kind::Dynamic(Dynamic::Array(Static::Bytea(32, Desc::Bytes))).val_sql(0, "foo"),
@@ -698,7 +710,7 @@ mod schema_tests {
         };
         assert_eq!(
             schema.col_sql("value").unwrap(),
-            "b2n(sdec(static_data, 0, 4)) as value"
+            "coalesce(b2n(sdec(static_data, 0, 4)), 0) as value"
         )
     }
 }
