@@ -99,7 +99,6 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
                 .collect(),
         );
     }
-
     for row in rows {
         let mut json_row: Vec<Value> = Vec::new();
         for (idx, column) in row.columns().iter().enumerate() {
