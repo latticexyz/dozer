@@ -90,7 +90,6 @@ pub async fn handle(
 
 fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
     let mut result: Rows = Vec::new();
-    let mut result: Rows = Vec::new();
     if let Some(first) = rows.first() {
         result.push(
             first
