@@ -70,7 +70,6 @@ pub async fn handle(
         .await
         .wrap_err("starting sql api read tx")?;
     let mut res: Vec<Rows> = Vec::new();
-    let start = std::time::Instant::now();
     for r in req {
         let preformatted_query = preformat_sql::preformat(&r.query);
         let query =
@@ -79,7 +78,6 @@ pub async fn handle(
 
         res.push(handle_rows(pgtx.query(&dbg!(query), &[]).await?)?);
     }
-    println!("Query loop took: {:?}", start.elapsed());
     Ok(Json(Response {
         block_height: pgtx
             .query_one("select max(num)::text from blocks", &[])
@@ -91,8 +89,7 @@ pub async fn handle(
 }
 
 fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
-    println!("rows: {:?}", rows);
-
+    let mut result: Rows = Vec::new();
     let mut result: Rows = Vec::new();
     if let Some(first) = rows.first() {
         result.push(
@@ -103,72 +100,41 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
                 .collect(),
         );
     }
-    println!("result: {:?}", result);
 
     for row in rows {
         let mut json_row: Vec<Value> = Vec::new();
-        println!("row: {:?}", row);
-
         for (idx, column) in row.columns().iter().enumerate() {
-            println!("column: {:?}", column.type_());
-
             let value = match *column.type_() {
                 Type::BOOL => {
-                    let b: Option<bool> = row.get(idx);
-                    match b {
-                        Some(val) => Value::Bool(val),
-                        None => Value::Null,
-                    }
+                    let b: bool = row.get(idx);
+                    Value::Bool(b)
                 }
                 Type::NUMERIC => {
-                    println!("row: {:?}", row);
-
-                    let s: Option<s256::Int> = row.get(idx);
-                    match s {
-                        Some(val) => Value::String(val.to_string()),
-                        None => Value::Null,
-                    }
+                    let s: s256::Int = row.get(idx);
+                    Value::String(s.to_string())
                 }
                 Type::INT2 | Type::INT4 | Type::INT8 => {
-                    let n: Option<i64> = row.get(idx);
-                    match n {
-                        Some(val) => Value::Number(val.into()),
-                        None => Value::Null,
-                    }
+                    let n: i64 = row.get(idx);
+                    Value::Number(n.into())
                 }
                 Type::BYTEA => {
-                    let b: Option<&[u8]> = row.get(idx);
-                    match b {
-                        Some(val) => Value::String(hex::encode_prefixed(val)),
-                        None => Value::Null,
-                    }
+                    let b: &[u8] = row.get(idx);
+                    Value::String(hex::encode_prefixed(b))
                 }
                 Type::TEXT => {
-                    let s: Option<String> = row.get(idx);
-                    match s {
-                        Some(val) => Value::String(val),
-                        None => Value::Null,
-                    }
+                    let s: String = row.get(idx);
+                    Value::String(s)
                 }
                 Type::NUMERIC_ARRAY => {
-                    let nums: Option<Vec<U256>> = row.get(idx);
-                    match nums {
-                        Some(val) => serde_json::json!(val
-                            .iter()
-                            .map(|n| n.to_string())
-                            .collect::<Vec<String>>()),
-                        None => Value::Null,
-                    }
+                    let nums: Vec<U256> = row.get(idx);
+                    serde_json::json!(nums.iter().map(|n| n.to_string()).collect::<Vec<String>>())
                 }
                 Type::BYTEA_ARRAY => {
-                    let arrays: Option<Vec<Vec<u8>>> = row.get::<usize, Option<Vec<Vec<u8>>>>(idx);
-                    match arrays {
-                        Some(val) => serde_json::json!(val
-                            .iter()
-                            .map(|array| Bytes::copy_from_slice(array))
-                            .collect_vec()),
-                        None => Value::Null,
-                    }
+                    let arrays: Vec<Vec<u8>> = row.get::<usize, Vec<Vec<u8>>>(idx);
+                    serde_json::json!(arrays
+                        .iter()
+                        .map(|array| Bytes::copy_from_slice(array))
+                        .collect_vec())
                 }
                 _ => Value::Null,
             };
