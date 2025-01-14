@@ -264,7 +264,7 @@ impl Validator {
     }
 
     fn validate_function(&mut self, function: &ast::Function) -> Result<(), api::Error> {
-        let name = function.name.to_string();
+        let name = function.name.to_string().to_lowercase();
         const VALID_FUNCS: [&str; 31] = [
             "decode",
             // Aggregate Functions
@@ -303,6 +303,10 @@ impl Validator {
             // Math Functions
             "round",
         ];
+
+        if !VALID_FUNCS.contains(&name.as_str()) {
+            return no!(format!("function {}", name));
+        }
 
         match &function.args {
             ast::FunctionArguments::List(args) => {
