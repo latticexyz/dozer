@@ -112,7 +112,10 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
                     Value::String(s.to_string())
                 }
                 Type::INT2 | Type::INT4 | Type::INT8 => {
-                    let n: i64 = row.get(idx);
+                    let n: i64 = match column.type_() {
+                        &Type::INT4 => row.get::<_, i32>(idx) as i64,
+                        _ => row.get(idx),
+                    };
                     Value::Number(n.into())
                 }
                 Type::BYTEA => {
