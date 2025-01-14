@@ -265,7 +265,7 @@ impl Validator {
 
     fn validate_function(&mut self, function: &ast::Function) -> Result<(), api::Error> {
         let name = function.name.to_string();
-        const VALID_FUNCS: [&str; 30] = [
+        const VALID_FUNCS: [&str; 31] = [
             "decode",
             // Aggregate Functions
             "count",
@@ -274,6 +274,7 @@ impl Validator {
             "min",
             "max",
             "array_agg",
+            "array_length",
             "string_agg",
             // String Functions
             "concat",
