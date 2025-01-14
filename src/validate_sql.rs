@@ -313,19 +313,18 @@ impl Validator {
                 for arg in args.args.iter() {
                     match arg {
                         ast::FunctionArg::Unnamed(expr) => match expr {
-                            ast::FunctionArgExpr::Expr(expr) => {
-                                self.validate_expression(expr)?;
-                            }
-                            _ => return no!("unsupported function argument type"),
+                            ast::FunctionArgExpr::Expr(expr) => self.validate_expression(expr)?,
+                            ast::FunctionArgExpr::Wildcard => return Ok(()),
+                            _ => return no!("function argument type"),
                         },
-                        _ => return no!("unsupported function argument type"),
+                        _ => return no!("function argument type"),
                     }
                 }
             }
             ast::FunctionArguments::Subquery(subquery) => {
                 self.validate_query(subquery)?;
             }
-            _ => return no!("unsupported function argument expression"),
+            _ => return no!("function argument expression"),
         }
 
         Ok(())
