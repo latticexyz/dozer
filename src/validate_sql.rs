@@ -406,6 +406,24 @@ mod tests {
     }
 
     #[test]
+    fn test_select_list_with_function_wildcard() {
+        let schemas = validate(
+            "select sum(*) from foo",
+            vec![test_schema("foo", vec!["c"])],
+        )
+        .expect("validating query");
+        assert_eq!(schemas.len(), 1);
+
+        let select_list = schemas[0]
+            .select_list
+            .as_ref()
+            .expect("no select list")
+            .iter()
+            .collect_vec();
+        assert_eq!(select_list, vec![] as Vec<&str>);
+    }
+
+    #[test]
     fn test_supported_statements() {
         vec![
             (
