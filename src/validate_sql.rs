@@ -304,8 +304,24 @@ impl Validator {
             "round",
         ];
 
-        if !VALID_FUNCS.contains(&name.as_str()) {
-            return no!(format!("function {}", name));
+        match &function.args {
+            ast::FunctionArguments::List(args) => {
+                for arg in args.args.iter() {
+                    match arg {
+                        ast::FunctionArg::Unnamed(expr) => match expr {
+                            ast::FunctionArgExpr::Expr(expr) => {
+                                self.validate_expression(expr)?;
+                            }
+                            _ => return no!("unsupported function argument type"),
+                        },
+                        _ => return no!("unsupported function argument type"),
+                    }
+                }
+            }
+            ast::FunctionArguments::Subquery(subquery) => {
+                self.validate_query(subquery)?;
+            }
+            _ => return no!("unsupported function argument expression"),
         }
 
         Ok(())
@@ -357,6 +373,24 @@ mod tests {
     fn test_select_list() {
         let schemas = validate("select c from foo", vec![test_schema("foo", vec!["c"])])
             .expect("validating query");
+        assert_eq!(schemas.len(), 1);
+
+        let select_list = schemas[0]
+            .select_list
+            .as_ref()
+            .expect("no select list")
+            .iter()
+            .collect_vec();
+        assert_eq!(select_list, vec!["c"]);
+    }
+
+    #[test]
+    fn test_select_list_with_function() {
+        let schemas = validate(
+            "select sum(c) from foo",
+            vec![test_schema("foo", vec!["c"])],
+        )
+        .expect("validating query");
         assert_eq!(schemas.len(), 1);
 
         let select_list = schemas[0]
