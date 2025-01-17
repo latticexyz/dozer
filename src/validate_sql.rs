@@ -29,6 +29,7 @@ pub fn validate(
             (s.full_name(), s)
         })
         .collect();
+
     let mut validator = Validator { schemas };
     validator.validate(query)?;
     Ok(validator.schemas.into_values().collect())
@@ -165,8 +166,14 @@ impl Validator {
 
     fn validate_compound_column(&mut self, id: &[ast::Ident]) -> Result<(), api::Error> {
         let (table_name, col_name) = match id.len() {
-            3 => (id[0..2].iter().join("."), id[2].to_string()),
-            2 => (id[0].to_string(), id[1].to_string()),
+            3 => (
+                id[0..2]
+                    .iter()
+                    .map(|i| i.value.trim_matches('"').to_string())
+                    .join("."),
+                id[2].to_string(),
+            ),
+            2 => (id[0].value.trim_matches('"').to_string(), id[1].to_string()),
             _ => {
                 return Err(api::Error::User(format!(
                     "compound column id must be of form: table.column got: {}",
