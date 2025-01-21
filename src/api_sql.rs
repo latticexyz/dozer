@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 
-use crate::{api, mud_schema, preformat_sql};
+use crate::{api, mud_schema, preformat_sql, s256};
 
 use alloy::{
     hex,
@@ -108,8 +108,11 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
                     Value::Bool(b)
                 }
                 Type::NUMERIC => {
-                    let s: rust_decimal::Decimal = row.get(idx);
-                    Value::String(s.to_string())
+                    let s: pg_bigdecimal::PgNumeric = row.get(idx);
+                    Value::String(s.n.unwrap().to_string())
+
+                    // let s: pg_bigdecimal::BigDecimal = row.get(idx);
+                    // Value::String(s.to_string())
                 }
                 Type::INT2 | Type::INT4 | Type::INT8 => {
                     let n: i64 = match column.type_() {
