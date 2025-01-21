@@ -33,7 +33,6 @@ pg_bigdecimal = "0.1.5"
 postgres-openssl = "0.5"
 reqwest = { version = "0.12.4", features = ["gzip", "json"] }
 ruint = { version = "1.12.1", features = ["postgres"] }
-rust_decimal = { version = "1.36.0", features = ["db-tokio-postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 sqlparser = { version = "0.47", features = ["visitor"] }
