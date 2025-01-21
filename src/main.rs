@@ -8,7 +8,6 @@ mod mud_encoding;
 mod mud_schema;
 mod preformat_sql;
 mod reindex;
-mod s256;
 mod validate_sql;
 
 use alloy::providers::ProviderBuilder;

@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 
-use crate::{api, mud_schema, preformat_sql, s256};
+use crate::{api, mud_schema, preformat_sql};
 
 use alloy::{
     hex,
