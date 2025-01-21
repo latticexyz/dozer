@@ -110,9 +110,6 @@ fn handle_rows(rows: Vec<tokio_postgres::Row>) -> Result<Rows, api::Error> {
                 Type::NUMERIC => {
                     let s: pg_bigdecimal::PgNumeric = row.get(idx);
                     Value::String(s.n.unwrap().to_string())
-
-                    // let s: pg_bigdecimal::BigDecimal = row.get(idx);
-                    // Value::String(s.to_string())
                 }
                 Type::INT2 | Type::INT4 | Type::INT8 => {
                     let n: i64 = match column.type_() {
