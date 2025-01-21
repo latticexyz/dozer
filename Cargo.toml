@@ -29,6 +29,7 @@ metrics-exporter-prometheus = "0.15"
 metrics-tracing-context = "0.16"
 metrics-util = "0.17"
 openssl = "0.10.64"
+pg_bigdecimal = "0.1.5"
 postgres-openssl = "0.5"
 reqwest = { version = "0.12.4", features = ["gzip", "json"] }
 ruint = { version = "1.12.1", features = ["postgres"] }
