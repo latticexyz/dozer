@@ -74,10 +74,7 @@ impl axum::response::IntoResponse for Error {
             Self::User(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::Server(e) => {
                 tracing::error!(%e, "server-error={:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    String::from("server error"),
-                )
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         };
         let m = ErrorMessage { msg: message };
