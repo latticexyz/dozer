@@ -131,7 +131,6 @@ $$ language plpgsql immutable parallel safe cost 1;
 create or replace function ddec(encoded_lengths bytea, dynamic_data bytea, field int)
 returns bytea as $$
 declare
-    dynamic_data_length int;
     field_start int := 1; --substring is index-1
     field_length int;
     tmp int;
