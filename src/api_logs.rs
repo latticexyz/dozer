@@ -338,7 +338,18 @@ mod tests {
                         THEN '\x00'::bytea
                         ELSE encoded_lengths
                     END AS encoded_lengths,
-                    dynamic_data,
+                    CASE
+                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                        THEN '\x00'::bytea
+                        ELSE substring(dynamic_data, 1,
+                         (get_byte(encoded_lengths, 25) << 48) |
+                         (get_byte(encoded_lengths, 26) << 40) |
+                         (get_byte(encoded_lengths, 27) << 32) |
+                         (get_byte(encoded_lengths, 28) << 24) |
+                         (get_byte(encoded_lengths, 29) << 16) |
+                         (get_byte(encoded_lengths, 30) << 8) |
+                         get_byte(encoded_lengths, 31))
+                    END AS dynamic_data,
                     deleted
                 from records
                 where not expired
@@ -376,7 +387,18 @@ mod tests {
                         THEN '\x00'::bytea
                         ELSE encoded_lengths
                     END AS encoded_lengths,
-                    dynamic_data,
+                    CASE
+                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                        THEN '\x00'::bytea
+                        ELSE substring(dynamic_data, 1,
+                         (get_byte(encoded_lengths, 25) << 48) |
+                         (get_byte(encoded_lengths, 26) << 40) |
+                         (get_byte(encoded_lengths, 27) << 32) |
+                         (get_byte(encoded_lengths, 28) << 24) |
+                         (get_byte(encoded_lengths, 29) << 16) |
+                         (get_byte(encoded_lengths, 30) << 8) |
+                         get_byte(encoded_lengths, 31))
+                    END AS dynamic_data,
                     deleted
                 from records
                 where not expired
@@ -416,7 +438,18 @@ mod tests {
                     THEN '\x00'::bytea
                     ELSE encoded_lengths
                 END AS encoded_lengths,
-                dynamic_data,
+                CASE
+                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                    THEN '\x00'::bytea
+                    ELSE substring(dynamic_data, 1,
+                         (get_byte(encoded_lengths, 25) << 48) |
+                         (get_byte(encoded_lengths, 26) << 40) |
+                         (get_byte(encoded_lengths, 27) << 32) |
+                         (get_byte(encoded_lengths, 28) << 24) |
+                         (get_byte(encoded_lengths, 29) << 16) |
+                         (get_byte(encoded_lengths, 30) << 8) |
+                         get_byte(encoded_lengths, 31))
+                END AS dynamic_data,
                 deleted
             FROM records
             WHERE NOT expired
