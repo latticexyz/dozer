@@ -589,12 +589,26 @@ impl Record {
             } => {
                 self.deleted = false;
                 self.encoded_lengths = encoded_lengths;
-                splice(
-                    &mut self.dynamic_data,
-                    start as usize,
-                    count as usize,
-                    &data,
-                );
+                if encoded_lengths == FixedBytes::<32>::ZERO {
+                    self.dynamic_data.clear();
+                } else {
+                    splice(
+                        &mut self.dynamic_data,
+                        start as usize,
+                        count as usize,
+                        &data,
+                    );
+
+                    let total_length = u64::from_be_bytes(
+                        [&[0][..], &encoded_lengths[25..32]]
+                            .concat()
+                            .try_into()
+                            .unwrap(),
+                    );
+                    if self.dynamic_data.len() > total_length as usize {
+                        self.dynamic_data.truncate(total_length as usize);
+                    }
+                }
             }
             UpdateKind::SSplice { start, data } => {
                 self.deleted = false;

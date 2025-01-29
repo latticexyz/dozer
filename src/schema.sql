@@ -148,7 +148,7 @@ begin
                     get_byte(encoded_lengths, 30)::int * 256 +
                     get_byte(encoded_lengths, 31)::int;
     IF dynamic_data_length != length(dynamic_data) THEN
-        RAISE EXCEPTION 'Total length does not match dynamic_data length.';
+        dynamic_data := substring(dynamic_data FROM 1 FOR dynamic_data_length);
     END IF;
 
     tmp := 20 - (field * 5);
