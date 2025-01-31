@@ -172,4 +172,25 @@ mod pl_pgsql_test {
         let res: &[u8] = row.get(0);
         assert_eq!(&[1u8; 32], res)
     }
+
+    #[tokio::test]
+    async fn test_ddec_mismatched_encoded_lengths() {
+        let (_pg_server, pg) = test_pg().await;
+        let encoded_lengths =
+            fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
+        let dynamic_data = &[1u8; 96];
+        let row = pg
+            .query_one("select ddec($1, $2, 0)", &[&encoded_lengths, &dynamic_data])
+            .await
+            .expect("issue with query");
+        let res: &[u8] = row.get(0);
+        assert_eq!(&[0u8; 0], res);
+
+        let row = pg
+            .query_one("select ddec($1, $2, 1)", &[&encoded_lengths, &dynamic_data])
+            .await
+            .expect("issue with query");
+        let res: &[u8] = row.get(0);
+        assert_eq!(&[0u8; 0], res)
+    }
 }
