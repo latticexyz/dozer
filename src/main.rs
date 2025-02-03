@@ -10,6 +10,9 @@ mod preformat_sql;
 mod reindex;
 mod validate_sql;
 
+#[cfg(test)]
+mod test_utils;
+
 use alloy::providers::ProviderBuilder;
 use axum::{
     body::Body,
@@ -42,7 +45,7 @@ struct Dozer {
         long = "url",
         global = true,
         env = "DOZER_URL",
-        default_value = "https://dozer.mud.redstonechain.com"
+        default_value = "https://dozer.mud.garnetchain.com"
     )]
     url: Url,
 
@@ -52,10 +55,14 @@ struct Dozer {
 
 #[derive(Parser)]
 struct ServerArgs {
-    #[arg(long, env = "PG_URL", default_value = "postgres://localhost/dozer")]
+    #[arg(
+        long,
+        env = "PG_URL",
+        default_value = "postgres://localhost/dozer_garnet"
+    )]
     pg_url: String,
 
-    #[arg(long, env = "ETH_URL", default_value = "https://rpc.redstonechain.com")]
+    #[arg(long, env = "ETH_URL", default_value = "https://rpc.garnetchain.com")]
     eth_url: Url,
 
     #[arg(long, env = "RO_PASSWORD")]
