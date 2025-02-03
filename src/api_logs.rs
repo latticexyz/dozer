@@ -17,7 +17,7 @@ use futures::Stream;
 use itertools::Itertools;
 use ruint::aliases::U64;
 use serde::{Deserialize, Serialize, Serializer};
-use tokio_postgres::{types::ToSql, Client, Row};
+use tokio_postgres::{types::ToSql, Row};
 
 fn u64_to_string<S>(x: &u64, s: S) -> Result<S::Ok, S::Error>
 where
@@ -302,48 +302,12 @@ impl LogsQuery {
 
 #[cfg(test)]
 mod tests {
-    static SCHEMA: &str = include_str!("./schema.sql");
-
-    use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
-
-    use alloy::primitives::{Address, LogData, B256};
-    use postgresql_embedded::{PostgreSQL, Settings, Version};
-    use tokio_postgres::NoTls;
-    use tracing_subscriber::FmtSubscriber;
-
     use super::*;
-
-    fn fmt_sql(sql: &str) -> Result<String> {
-        const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
-        let ast = Parser::parse_sql(PG, sql)?;
-        Ok(ast[0].to_string())
-    }
-
-    async fn test_pg() -> (PostgreSQL, Client) {
-        let pg_settings = Settings {
-            version: Version::new(16, Some(2), Some(3)),
-            ..Default::default()
-        };
-        let mut db = PostgreSQL::new(pg_settings);
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-        let (client, connection) = tokio_postgres::connect(&db.settings().url("dozer-test"), NoTls)
-            .await
-            .expect("unable to start test database");
-        tokio::spawn(connection);
-        client
-            .batch_execute(SCHEMA)
-            .await
-            .expect("resetting schema");
-        (db, client)
-    }
+    use crate::test_utils;
 
     #[tokio::test]
     async fn test_pg_setup() {
-        let (_pg_server, mut pg) = test_pg().await;
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
         let pgtx = pg.transaction().await.expect("opening index tx");
 
         pgtx.execute(
@@ -374,7 +338,7 @@ mod tests {
                 '\x0000000000000000000000000000000000000000000000000000000000000002',
                 '\x1010101010101010101010101010101010101010101010101010101010101010',
                 '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000020',
+                '\x0000000000000000000000000000000000000000000000000000000000000008',
                 1,
                 0,
                 false
@@ -417,15 +381,13 @@ mod tests {
         );
         assert_eq!(
             res.last().unwrap().args.dynamic_data,
-            Some(Bytes::from(fixed_bytes!(
-                "1010101010101010101010101010101010101010101010101010101010101010"
-            )))
+            Some(Bytes::from(fixed_bytes!("1010101010101010")))
         );
     }
 
     #[tokio::test]
     async fn test_next_to_index() {
-        let (_pg_server, mut pg) = test_pg().await;
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
         let pgtx = pg.transaction().await.expect("opening index tx");
         pgtx.execute(
             "insert into blocks(num, hash) values ($1, $2)",
@@ -446,8 +408,8 @@ mod tests {
             },
         );
         assert_eq!(
-            fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            fmt_sql(
+            test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
+            test_utils::fmt_sql(
                 r#"
                 select
                     block_num,
@@ -495,8 +457,8 @@ mod tests {
             },
         );
         assert_eq!(
-            fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            fmt_sql(
+            test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
+            test_utils::fmt_sql(
                 r#"
                 select
                     block_num,
@@ -548,7 +510,9 @@ mod tests {
             },
         );
         assert_eq!(query.params.len(), 5);
-        assert_eq!(fmt_sql(&query.to_sql(false)).unwrap(), fmt_sql(r#"
+        assert_eq!(
+            test_utils::fmt_sql(&query.to_sql(false)).unwrap(),
+            test_utils::fmt_sql(r#"
             SELECT
                 block_num,
                 log_idx,

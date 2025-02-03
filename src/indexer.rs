@@ -733,11 +733,8 @@ fn splice(data: &mut Vec<u8>, i: usize, n: usize, new: &Bytes) {
 
 #[cfg(test)]
 mod tests {
-    static SCHEMA: &str = include_str!("./schema.sql");
-
+    use crate::test_utils;
     use alloy::primitives::{Address, LogData, B256};
-    use postgresql_embedded::{PostgreSQL, Settings, Version};
-    use tokio_postgres::NoTls;
     use tracing_subscriber::FmtSubscriber;
 
     use super::*;
@@ -753,28 +750,6 @@ mod tests {
             tracing::subscriber::set_global_default(subscriber)
                 .expect("setting default subscriber failed");
         });
-    }
-
-    async fn test_pg() -> (PostgreSQL, Client) {
-        let pg_settings = Settings {
-            version: Version::new(16, Some(2), Some(3)),
-            ..Default::default()
-        };
-        let mut db = PostgreSQL::new(pg_settings);
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-        let (client, connection) = tokio_postgres::connect(&db.settings().url("dozer-test"), NoTls)
-            .await
-            .expect("unable to start test database");
-        tokio::spawn(connection);
-        client
-            .batch_execute(SCHEMA)
-            .await
-            .expect("resetting schema");
-        (db, client)
     }
 
     fn test_block(num: u64, hash: u8, parent: u8) -> Block {
@@ -883,7 +858,7 @@ mod tests {
     #[tokio::test]
     async fn test_index() {
         logging();
-        let (_pg_server, mut pg) = test_pg().await;
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
         pg.execute(
             "insert into blocks(num, hash) values ($1, $2)",
             &[&U64::from(0), &FixedBytes::<32>::ZERO],
@@ -956,7 +931,7 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index() {
         logging();
-        let (_pg_server, mut pg) = test_pg().await;
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
         let pgtx = pg.transaction().await.expect("opening index tx");
         pgtx.execute(
             "insert into blocks(num, hash) values ($1, $2)",
@@ -977,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn test_next_to_index_reorg() {
         logging();
-        let (_pg_server, mut pg) = test_pg().await;
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
         let pgtx = pg.transaction().await.expect("opening index tx");
 
         pgtx.execute(
