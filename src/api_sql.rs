@@ -212,3 +212,120 @@ pub mod cli {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+    use crate::test_utils;
+
+    #[tokio::test]
+    async fn test_api_sql_handle() {
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
+
+        pgtx.execute(
+            r#"
+            INSERT INTO records (
+                address,
+                table_id,
+                key,
+                dynamic_data,
+                static_data,
+                encoded_lengths,
+                block_num,
+                log_idx,
+                expired
+            ) VALUES (
+                '\x0000000000000000000000000000000000000001',
+                '\x6f74776f726c6400000000000000000046756e6374696f6e5369676e61747572',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000000',
+                0,
+                0,
+                false
+            ), (
+                '\x0000000000000000000000000000000000000001',
+                '\x6f74776f726c6400000000000000000046756e6374696f6e5369676e61747572',
+                '\x0000000000000000000000000000000000000000000000000000000000000002',
+                '\xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000008',
+                1,
+                0,
+                false
+            )"#,
+            &[],
+        )
+        .await
+        .expect("setting up records table");
+
+        pgtx.execute(
+            r#"
+            INSERT INTO tables (
+                block_num,
+                log_idx,
+                address,
+                id,
+                name,
+                key_schema,
+                val_schema,
+                key_names,
+                val_names
+            ) VALUES (
+                0,
+                0,
+                '\x0000000000000000000000000000000000000001',
+                '006f726c640000000000000000004675',
+                'FunctionSignatur',
+                '\x0004010043000000000000000000000000000000000000000000000000000000',
+                '\x00000001C5000000000000000000000000000000000000000000000000000000',
+                '{functionSelector}',
+                '{functionSignature}'
+            )"#,
+            &[],
+        )
+        .await
+        .expect("setting up FunctionSignatur table");
+
+        let req = vec![Request {
+            block_height: None,
+            address: Address::from_str("0x0000000000000000000000000000000000000001").unwrap(),
+            query: "select functionSelector from FunctionSignatur".to_string(),
+        }];
+
+        // print all tables
+        let tables = pgtx
+            .query("select * from tables", &[])
+            .await
+            .expect("querying");
+        for row in &tables {
+            let name: &str = row.get("name");
+            // let address: String = row.get("address");
+
+            // println!("table name: {}", name);
+            // println!("address: {}", address);
+        }
+
+        let mut res: Vec<Rows> = Vec::new();
+        for r in req {
+            let preformatted_query = preformat_sql::preformat(&r.query);
+            let query =
+                mud_schema::query::enhance(&pgtx, r.address, r.block_height, &preformatted_query)
+                    .await
+                    .expect("enhancing query");
+
+            res.push(
+                handle_rows(pgtx.query(&dbg!(query), &[]).await.expect("querying"))
+                    .expect("handling rows"),
+            );
+        }
+
+        // assert_eq!(res.len(), 1);
+        // assert_eq!(res[0].len(), 2);
+        // assert_eq!(res[0][0].len(), 9);
+    }
+}
