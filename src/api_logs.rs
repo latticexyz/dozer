@@ -276,7 +276,7 @@ impl LogsQuery {
                 END AS encoded_lengths,
                 CASE
                     WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x00'::bytea
+                    THEN '\x'::bytea
                     ELSE substring(dynamic_data, 1,
                          (get_byte(encoded_lengths, 25) << 48) |
                          (get_byte(encoded_lengths, 26) << 40) |
@@ -306,7 +306,7 @@ mod tests {
     use crate::test_utils;
 
     #[tokio::test]
-    async fn test_pg_setup() {
+    async fn test_handle() {
         let (_pg_server, mut pg) = test_utils::test_pg().await;
         let pgtx = pg.transaction().await.expect("opening index tx");
 
@@ -377,7 +377,7 @@ mod tests {
 
         assert_eq!(
             res.first().unwrap().args.dynamic_data,
-            Some(Bytes::from(FixedBytes::<1>::ZERO))
+            Some(Bytes::from(FixedBytes::<0>::ZERO))
         );
         assert_eq!(
             res.last().unwrap().args.dynamic_data,
@@ -425,7 +425,7 @@ mod tests {
                     END AS encoded_lengths,
                     CASE
                         WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x00'::bytea
+                        THEN '\x'::bytea
                         ELSE substring(dynamic_data, 1,
                          (get_byte(encoded_lengths, 25) << 48) |
                          (get_byte(encoded_lengths, 26) << 40) |
@@ -474,7 +474,7 @@ mod tests {
                     END AS encoded_lengths,
                     CASE
                         WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x00'::bytea
+                        THEN '\x'::bytea
                         ELSE substring(dynamic_data, 1,
                          (get_byte(encoded_lengths, 25) << 48) |
                          (get_byte(encoded_lengths, 26) << 40) |
@@ -527,7 +527,7 @@ mod tests {
                 END AS encoded_lengths,
                 CASE
                     WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x00'::bytea
+                    THEN '\x'::bytea
                     ELSE substring(dynamic_data, 1,
                          (get_byte(encoded_lengths, 25) << 48) |
                          (get_byte(encoded_lengths, 26) << 40) |
