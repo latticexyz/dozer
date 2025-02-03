@@ -17,7 +17,7 @@ use futures::Stream;
 use itertools::Itertools;
 use ruint::aliases::U64;
 use serde::{Deserialize, Serialize, Serializer};
-use tokio_postgres::{types::ToSql, Row};
+use tokio_postgres::{types::ToSql, Client, Row};
 
 fn u64_to_string<S>(x: &u64, s: S) -> Result<S::Ok, S::Error>
 where
@@ -302,7 +302,14 @@ impl LogsQuery {
 
 #[cfg(test)]
 mod tests {
+    static SCHEMA: &str = include_str!("./schema.sql");
+
     use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
+
+    use alloy::primitives::{Address, LogData, B256};
+    use postgresql_embedded::{PostgreSQL, Settings, Version};
+    use tokio_postgres::NoTls;
+    use tracing_subscriber::FmtSubscriber;
 
     use super::*;
 
@@ -310,6 +317,122 @@ mod tests {
         const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
         let ast = Parser::parse_sql(PG, sql)?;
         Ok(ast[0].to_string())
+    }
+
+    async fn test_pg() -> (PostgreSQL, Client) {
+        let pg_settings = Settings {
+            version: Version::new(16, Some(2), Some(3)),
+            ..Default::default()
+        };
+        let mut db = PostgreSQL::new(pg_settings);
+        db.setup().await.expect("setting up pg");
+        db.start().await.expect("starting pg");
+        db.create_database("dozer-test")
+            .await
+            .expect("creating test db");
+        let (client, connection) = tokio_postgres::connect(&db.settings().url("dozer-test"), NoTls)
+            .await
+            .expect("unable to start test database");
+        tokio::spawn(connection);
+        client
+            .batch_execute(SCHEMA)
+            .await
+            .expect("resetting schema");
+        (db, client)
+    }
+
+    #[tokio::test]
+    async fn test_pg_setup() {
+        let (_pg_server, mut pg) = test_pg().await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
+
+        pgtx.execute(
+            r#"
+            INSERT INTO records (
+                address,
+                table_id,
+                key,
+                dynamic_data,
+                static_data,
+                encoded_lengths,
+                block_num,
+                log_idx,
+                expired
+            ) VALUES (
+                '\x0000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x1010101010101010101010101010101010101010101010101010101010101010',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000000',
+                0,
+                0,
+                false
+            ), (
+                '\x0000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000002',
+                '\x1010101010101010101010101010101010101010101010101010101010101010',
+                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x0000000000000000000000000000000000000000000000000000000000000020',
+                1,
+                0,
+                false
+            )"#,
+            &[],
+        )
+        .await
+        .expect("setting up records table");
+
+        let query = LogsQuery::new(
+            None,
+            LogsRequestInput {
+                _chain_id: Some(690),
+                address: Some(FixedBytes::<20>::with_last_byte(1)),
+                filters: Some(vec![]),
+            },
+        );
+
+        let params: &[&(dyn ToSql + Sync)] = &query
+            .params
+            .iter()
+            .map(|b| b.as_ref() as &(dyn ToSql + Sync))
+            .collect::<Vec<_>>()[..];
+
+        let res: Vec<Log> = pgtx
+            .query(&query.to_sql(false), params)
+            .await
+            .unwrap()
+            .iter()
+            .map(Log::from_row)
+            .collect::<Result<Vec<Log>, _>>()
+            .unwrap()
+            .into_iter()
+            .sorted_by_key(|l| (l.block_num, l.log_idx))
+            .collect_vec();
+
+        assert_eq!(
+            res.first().unwrap().args.dynamic_data,
+            Some(Bytes::from(FixedBytes::<1>::ZERO))
+        );
+        assert_eq!(
+            res.last().unwrap().args.dynamic_data,
+            Some(Bytes::from(fixed_bytes!(
+                "1010101010101010101010101010101010101010101010101010101010101010"
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_next_to_index() {
+        let (_pg_server, mut pg) = test_pg().await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
+        pgtx.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(0), &FixedBytes::<32>::ZERO],
+        )
+        .await
+        .expect("setting up blocks table");
     }
 
     #[test]
