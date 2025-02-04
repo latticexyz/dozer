@@ -304,6 +304,15 @@ impl LogsQuery {
 mod tests {
     use super::*;
     use crate::test_utils;
+    use alloy::hex;
+
+    const TEST_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
+    const TEST_TABLE_ID: &str =
+        "0x74626170700000000000000000000000546573745461626c6500000000000000";
+    const TEST_STATIC_DATA: &str =
+        "0x0000000000000000000000000000000000000000000000000000000000000001";
+    const TEST_DYNAMIC_DATA: &str =
+        "0xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF";
 
     #[tokio::test]
     async fn test_api_logs_handle() {
@@ -312,38 +321,16 @@ mod tests {
 
         pgtx.execute(
             r#"
-            INSERT INTO records (
-                address,
-                table_id,
-                key,
-                dynamic_data,
-                static_data,
-                encoded_lengths,
-                block_num,
-                log_idx,
-                expired
-            ) VALUES (
-                '\x0000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF',
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000000',
-                0,
-                0,
-                false
-            ), (
-                '\x0000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000002',
-                '\xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF',
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000008',
-                1,
-                0,
-                false
-            )"#,
-            &[],
+            INSERT INTO records (address, table_id, key, dynamic_data, static_data, encoded_lengths, block_num, log_idx, expired)
+            VALUES
+                ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000001', $3, $4, '\x0000000000000000000000000000000000000000000000000000000000000000', 0, 0, false),
+                ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000002', $3, $4, '\x0000000000000000000000000000000000000000000000000000000000000008', 1, 0, false)"#,
+            &[
+                &hex::decode(&TEST_ADDRESS[2..]).unwrap(),
+                &hex::decode(&TEST_TABLE_ID[2..]).unwrap(),
+                &hex::decode(&TEST_DYNAMIC_DATA[2..]).unwrap(),
+                &hex::decode(&TEST_STATIC_DATA[2..]).unwrap(),
+            ],
         )
         .await
         .expect("setting up records table");

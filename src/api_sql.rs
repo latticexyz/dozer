@@ -222,11 +222,12 @@ mod tests {
     const TEST_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
     const TEST_TABLE_ID: &str =
         "0x74626170700000000000000000000000546573745461626c6500000000000000";
-    const STATIC_DATA: &str = "0x0000000000000000000000000000000000000000000000000000000000000002";
-    const DYNAMIC_DATA: &str = "0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002";
-    const ENCODED_LENGTHS_EMPTY: &str =
+    const TEST_STATIC_DATA: &str =
+        "0x0000000000000000000000000000000000000000000000000000000000000002";
+    const TEST_DYNAMIC_DATA: &str = "0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002";
+    const TEST_ENCODED_LENGTHS_EMPTY: &str =
         "0x0000000000000000000000000000000000000000000000000000000000000000";
-    const ENCODED_LENGTHS_WITH_DATA: &str =
+    const TEST_ENCODED_LENGTHS_WITH_DATA: &str =
         "0x0000000000000000000000000000000000000000000000004000000000000040";
 
     #[tokio::test]
@@ -235,34 +236,18 @@ mod tests {
         let pgtx = pg.transaction().await.expect("opening index tx");
 
         pgtx.execute(
-            r#"
-            INSERT INTO records (
-                address, table_id, key, dynamic_data, static_data, encoded_lengths,
-                block_num, log_idx, expired
-            ) VALUES (
-                $1, $2,
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\x',
-                $3, $4,
-                0, 0, false
-            ), (
-                $1, $2,
-                '\x0000000000000000000000000000000000000000000000000000000000000002',
-                $5, $3, $4,
-                1, 0, false
-            ), (
-                $1, $2,
-                '\x0000000000000000000000000000000000000000000000000000000000000003',
-                $5, $3, $6,
-                1, 0, false
-            )"#,
+            r#"INSERT INTO records (address, table_id, key, dynamic_data, static_data, encoded_lengths, block_num, log_idx, expired)
+            VALUES
+            ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000001', '\x', $3, $4, 0, 0, false),
+            ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000002', $5, $3, $4, 1, 0, false),
+            ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000003', $5, $3, $6, 1, 0, false)"#,
             &[
                 &hex::decode(&TEST_ADDRESS[2..]).unwrap(),
                 &hex::decode(&TEST_TABLE_ID[2..]).unwrap(),
-                &hex::decode(&STATIC_DATA[2..]).unwrap(),
-                &hex::decode(&ENCODED_LENGTHS_EMPTY[2..]).unwrap(),
-                &hex::decode(&DYNAMIC_DATA[2..]).unwrap(),
-                &hex::decode(&ENCODED_LENGTHS_WITH_DATA[2..]).unwrap(),
+                &hex::decode(&TEST_STATIC_DATA[2..]).unwrap(),
+                &hex::decode(&TEST_ENCODED_LENGTHS_EMPTY[2..]).unwrap(),
+                &hex::decode(&TEST_DYNAMIC_DATA[2..]).unwrap(),
+                &hex::decode(&TEST_ENCODED_LENGTHS_WITH_DATA[2..]).unwrap(),
             ],
         )
         .await
