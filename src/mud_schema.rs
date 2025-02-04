@@ -555,7 +555,6 @@ impl Schema {
             .into_iter()
             .map(|name| (encode_resource_id(&name), name))
             .collect();
-
         let mut res = pgtx
             .query(
                 r#"
@@ -570,7 +569,6 @@ impl Schema {
             .iter()
             .map(Schema::from_row)
             .collect::<Result<Vec<Schema>, _>>()?;
-
         res.iter_mut().for_each(|schema| {
             schema.query_name = idmap
                 .get(&schema.table_id[2..])
