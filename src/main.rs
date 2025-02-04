@@ -45,7 +45,7 @@ struct Dozer {
         long = "url",
         global = true,
         env = "DOZER_URL",
-        default_value = "https://dozer.mud.garnetchain.com"
+        default_value = "https://dozer.mud.redstonechain.com"
     )]
     url: Url,
 
@@ -55,14 +55,10 @@ struct Dozer {
 
 #[derive(Parser)]
 struct ServerArgs {
-    #[arg(
-        long,
-        env = "PG_URL",
-        default_value = "postgres://localhost/dozer_garnet"
-    )]
+    #[arg(long, env = "PG_URL", default_value = "postgres://localhost/dozer")]
     pg_url: String,
 
-    #[arg(long, env = "ETH_URL", default_value = "https://rpc.garnetchain.com")]
+    #[arg(long, env = "ETH_URL", default_value = "https://rpc.redstonechain.com")]
     eth_url: Url,
 
     #[arg(long, env = "RO_PASSWORD")]
