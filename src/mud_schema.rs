@@ -39,11 +39,6 @@ pub mod query {
         let parsed_query =
             Parser::parse_sql(PG, user_query).map_err(|e| api::Error::User(e.to_string()))?;
         let schemas = load_schemas(pgtx, address, &parsed_query).await?;
-
-        println!("schemas: {:?}", schemas);
-        println!("address: {:?}", address);
-        println!("parsed_query: {:?}", parsed_query);
-
         if schemas.is_empty() {
             return Err(api::Error::User("schemas not found".to_string()));
         }
@@ -58,16 +53,10 @@ pub mod query {
         let mut table_names = HashSet::new();
         visit_relations(query, |relation| {
             let mut relname = relation.to_string();
-
-            println!("relname: {:?}", relname);
-
             relname.truncate(30);
             table_names.insert(relname);
             ControlFlow::<()>::Continue(())
         });
-
-        println!("table_names: {:?}", table_names);
-
         Schema::from_pg(pgtx, address, table_names.into_iter().collect()).await
     }
 
@@ -567,8 +556,6 @@ impl Schema {
             .map(|name| (encode_resource_id(&name), name))
             .collect();
 
-        println!("idmap: {:?}", idmap);
-
         let mut res = pgtx
             .query(
                 r#"
@@ -583,28 +570,6 @@ impl Schema {
             .iter()
             .map(Schema::from_row)
             .collect::<Result<Vec<Schema>, _>>()?;
-
-        println!("res: {:?}", res);
-
-        let mut res2 = pgtx
-            .query(
-                r#"
-                select address, id, substring(id from 3 for 30) as id_substring, key_names, key_schema, val_names, val_schema, name
-                from tables
-                "#,
-                &[],
-            )
-            .await?;
-
-        println!("res2: {:?}", res2);
-        for row in res2 {
-            // Convert the bytes to a String and print it
-            let id_substring = row.get::<&str, Vec<u8>>("id_substring");
-            println!("id_substring: {}", String::from_utf8_lossy(&id_substring));
-
-            let id = row.get::<&str, Vec<u8>>("id");
-            println!("id: {}", String::from_utf8_lossy(&id));
-        }
 
         res.iter_mut().for_each(|schema| {
             schema.query_name = idmap

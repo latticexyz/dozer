@@ -215,10 +215,9 @@ pub mod cli {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use super::*;
     use crate::test_utils;
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn test_api_sql_handle() {
@@ -239,21 +238,31 @@ mod tests {
                 expired
             ) VALUES (
                 '\x0000000000000000000000000000000000000001',
-                '\x6f74776f726c6400000000000000000046756e6374696f6e5369676e61747572',
+                '\x74626170700000000000000000000000546573745461626c6500000000000000',
                 '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF',
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
+                '\x',
+                '\x0000000000000000000000000000000000000000000000000000000000000002',
                 '\x0000000000000000000000000000000000000000000000000000000000000000',
                 0,
                 0,
                 false
             ), (
                 '\x0000000000000000000000000000000000000001',
-                '\x6f74776f726c6400000000000000000046756e6374696f6e5369676e61747572',
+                '\x74626170700000000000000000000000546573745461626c6500000000000000',
                 '\x0000000000000000000000000000000000000000000000000000000000000002',
-                '\xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF',
-                '\x0000000000000000000000000000000000000000000000000000000000000001',
-                '\x0000000000000000000000000000000000000000000000000000000000000008',
+                '\x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002',
+                '\x0000000000000000000000000000000000000000000000000000000000000002',
+                '\x0000000000000000000000000000000000000000000000000000000000000000',
+                1,
+                0,
+                false
+            ), (
+                '\x0000000000000000000000000000000000000001',
+                '\x74626170700000000000000000000000546573745461626c6500000000000000',
+                '\x0000000000000000000000000000000000000000000000000000000000000003',
+                '\x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002',
+                '\x0000000000000000000000000000000000000000000000000000000000000002',
+                '\x0000000000000000000000000000000000000000000000004000000000000040',
                 1,
                 0,
                 false
@@ -279,12 +288,12 @@ mod tests {
                 0,
                 0,
                 '\x0000000000000000000000000000000000000001',
-                '006f726c640000000000000000004675',
-                'FunctionSignatur',
-                '\x0004010043000000000000000000000000000000000000000000000000000000',
-                '\x00000001C5000000000000000000000000000000000000000000000000000000',
-                '{functionSelector}',
-                '{functionSignature}'
+                '\x74626170700000000000000000000000546573745461626c6500000000000000',
+                'TestTable',
+                '\x002001001F000000000000000000000000000000000000000000000000000000',
+                '\x002001011F810000000000000000000000000000000000000000000000000000',
+                '{column1}',
+                '{column2,column3}'
             )"#,
             &[],
         )
@@ -294,21 +303,8 @@ mod tests {
         let req = vec![Request {
             block_height: None,
             address: Address::from_str("0x0000000000000000000000000000000000000001").unwrap(),
-            query: "select functionSelector from FunctionSignatur".to_string(),
+            query: "select column1, column2, column3 from app__TestTable".to_string(),
         }];
-
-        // print all tables
-        let tables = pgtx
-            .query("select * from tables", &[])
-            .await
-            .expect("querying");
-        for row in &tables {
-            let name: &str = row.get("name");
-            // let address: String = row.get("address");
-
-            // println!("table name: {}", name);
-            // println!("address: {}", address);
-        }
 
         let mut res: Vec<Rows> = Vec::new();
         for r in req {
@@ -324,8 +320,31 @@ mod tests {
             );
         }
 
-        // assert_eq!(res.len(), 1);
-        // assert_eq!(res[0].len(), 2);
-        // assert_eq!(res[0][0].len(), 9);
+        let query_res = res.get(0).unwrap();
+        let columns = query_res.get(0).unwrap();
+        assert_eq!(columns[0].as_str().unwrap(), "column1");
+        assert_eq!(columns[1].as_str().unwrap(), "column2");
+        assert_eq!(columns[2].as_str().unwrap(), "column3");
+
+        let empty_dynamic_data = query_res.get(1).unwrap();
+        assert_eq!(empty_dynamic_data[0].as_str().unwrap(), "1");
+        assert_eq!(empty_dynamic_data[1].as_str().unwrap(), "2");
+        assert_eq!(empty_dynamic_data[2], Value::Array(vec![]));
+
+        let mismatched_dynamic_data = query_res.get(2).unwrap();
+        assert_eq!(mismatched_dynamic_data[0].as_str().unwrap(), "2");
+        assert_eq!(mismatched_dynamic_data[1].as_str().unwrap(), "2");
+        assert_eq!(mismatched_dynamic_data[2], Value::Array(vec![]));
+
+        let non_empty_dynamic_data = query_res.get(3).unwrap();
+        assert_eq!(non_empty_dynamic_data[0].as_str().unwrap(), "3");
+        assert_eq!(non_empty_dynamic_data[1].as_str().unwrap(), "2");
+        assert_eq!(
+            non_empty_dynamic_data[2],
+            Value::Array(vec![
+                Value::String("1".to_string()),
+                Value::String("2".to_string())
+            ])
+        );
     }
 }
