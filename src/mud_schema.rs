@@ -53,7 +53,7 @@ pub mod query {
         let mut table_names = HashSet::new();
         visit_relations(query, |relation| {
             let mut relname = relation.to_string();
-            relname.truncate(31);
+            relname.truncate(33);
             table_names.insert(relname);
             ControlFlow::<()>::Continue(())
         });
