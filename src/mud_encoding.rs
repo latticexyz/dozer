@@ -110,37 +110,12 @@ mod dynamic_data_test {
 
 #[cfg(test)]
 mod pl_pgsql_test {
+    use crate::test_utils;
     use alloy::primitives::fixed_bytes;
-    use postgresql_embedded::{PostgreSQL, Settings, Version};
-    use tokio_postgres::{Client, NoTls};
-
-    static SCHEMA: &str = include_str!("./schema.sql");
-
-    async fn test_pg() -> (PostgreSQL, Client) {
-        let pg_settings = Settings {
-            version: Version::new(16, Some(2), Some(3)),
-            ..Default::default()
-        };
-        let mut db = PostgreSQL::new(pg_settings);
-        db.setup().await.expect("setting up pg");
-        db.start().await.expect("starting pg");
-        db.create_database("dozer-test")
-            .await
-            .expect("creating test db");
-        let (client, connection) = tokio_postgres::connect(&db.settings().url("dozer-test"), NoTls)
-            .await
-            .expect("unable to start test database");
-        tokio::spawn(connection);
-        client
-            .batch_execute(SCHEMA)
-            .await
-            .expect("resetting schema");
-        (db, client)
-    }
 
     #[tokio::test]
     async fn test_ddec_empty() {
-        let (_pg_server, pg) = test_pg().await;
+        let (_pg_server, pg) = test_utils::test_pg().await;
         let encoded_lengths =
             fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
         let dynamic_data = &[0u8; 0];
@@ -154,7 +129,7 @@ mod pl_pgsql_test {
 
     #[tokio::test]
     async fn test_ddec() {
-        let (_pg_server, pg) = test_pg().await;
+        let (_pg_server, pg) = test_utils::test_pg().await;
         let encoded_lengths =
             fixed_bytes!("0000000000000000000000000000000000000020000000004000000000000060");
         let dynamic_data = &[1u8; 96];
@@ -171,5 +146,35 @@ mod pl_pgsql_test {
             .expect("issue with query");
         let res: &[u8] = row.get(0);
         assert_eq!(&[1u8; 32], res)
+    }
+
+    #[tokio::test]
+    async fn test_ddec_mismatched_encoded_lengths() {
+        let (_pg_server, pg) = test_utils::test_pg().await;
+        let encoded_lengths_empty =
+            fixed_bytes!("0000000000000000000000000000000000000000000000000000000000000000");
+        let dynamic_data = &[1u8; 128];
+        let row = pg
+            .query_one(
+                "select ddec($1, $2, 0)",
+                &[&encoded_lengths_empty, &dynamic_data],
+            )
+            .await
+            .expect("issue with query");
+        let res: &[u8] = row.get(0);
+        assert_eq!(&[0u8; 0], res);
+
+        let encoded_lengths_mismatched =
+            fixed_bytes!("0000000000000000000000000000000000000020000000004000000000000060");
+        let row = pg
+            .query_one(
+                "select ddec($1, $2, 0)",
+                &[&encoded_lengths_mismatched, &dynamic_data],
+            )
+            .await
+            .expect("issue with query");
+
+        let res: &[u8] = row.get(0);
+        assert_eq!(&[1u8; 64], res)
     }
 }

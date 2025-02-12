@@ -10,6 +10,9 @@ mod preformat_sql;
 mod reindex;
 mod validate_sql;
 
+#[cfg(test)]
+mod test_utils;
+
 use alloy::providers::ProviderBuilder;
 use axum::{
     body::Body,

@@ -131,7 +131,6 @@ $$ language plpgsql immutable parallel safe cost 1;
 create or replace function ddec(encoded_lengths bytea, dynamic_data bytea, field int)
 returns bytea as $$
 declare
-    dynamic_data_length int;
     field_start int := 1; --substring is index-1
     field_length int;
     tmp int;
@@ -139,17 +138,6 @@ begin
     if length(encoded_lengths) != 32 then
         raise exception 'encoded_length must be 32 bytes got %', length(encoded_lengths);
     end if;
-
-    dynamic_data_length := get_byte(encoded_lengths, 25)::int * 256^6 +
-                    get_byte(encoded_lengths, 26)::int * 256^5 +
-                    get_byte(encoded_lengths, 27)::int * 256^4 +
-                    get_byte(encoded_lengths, 28)::int * 256^3 +
-                    get_byte(encoded_lengths, 29)::int * 256^2 +
-                    get_byte(encoded_lengths, 30)::int * 256 +
-                    get_byte(encoded_lengths, 31)::int;
-    IF dynamic_data_length != length(dynamic_data) THEN
-        RAISE EXCEPTION 'Total length does not match dynamic_data length.';
-    END IF;
 
     tmp := 20 - (field * 5);
     field_length := get_byte(encoded_lengths, tmp)::int * 256^4 +
