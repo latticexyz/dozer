@@ -306,14 +306,6 @@ mod tests {
     use crate::test_utils;
     use alloy::hex;
 
-    const TEST_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
-    const TEST_TABLE_ID: &str =
-        "0x74626170700000000000000000000000546573745461626c6500000000000000";
-    const TEST_STATIC_DATA: &str =
-        "0x0000000000000000000000000000000000000000000000000000000000000001";
-    const TEST_DYNAMIC_DATA: &str =
-        "0xAAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF";
-
     #[tokio::test]
     async fn test_api_logs_handle() {
         let (_pg_server, mut pg) = test_utils::test_pg().await;
@@ -326,10 +318,10 @@ mod tests {
                 ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000001', $3, $4, '\x0000000000000000000000000000000000000000000000000000000000000000', 0, 0, false),
                 ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000002', $3, $4, '\x0000000000000000000000000000000000000000000000000000000000000008', 1, 0, false)"#,
             &[
-                &hex::decode(&TEST_ADDRESS[2..]).unwrap(),
-                &hex::decode(&TEST_TABLE_ID[2..]).unwrap(),
-                &hex::decode(&TEST_DYNAMIC_DATA[2..]).unwrap(),
-                &hex::decode(&TEST_STATIC_DATA[2..]).unwrap(),
+                &hex!("0000000000000000000000000000000000000001").as_slice(), // address
+                &hex!("74626170700000000000000000000000546573745461626c6500000000000000").as_slice(), // table_id
+                &hex!("AAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF").as_slice(), // dynamic_data
+                &hex!("0000000000000000000000000000000000000000000000000000000000000001").as_slice(), // static_data
             ],
         )
         .await
@@ -366,6 +358,7 @@ mod tests {
             res.first().unwrap().args.dynamic_data,
             Some(Bytes::from(FixedBytes::<0>::ZERO))
         );
+        // dynamic_data is longer than encoded_lengths, and gets truncated by encoded_lengths
         assert_eq!(
             res.last().unwrap().args.dynamic_data,
             Some(Bytes::from(fixed_bytes!("AAAABBBBCCCCDDDD")))
