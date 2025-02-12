@@ -212,3 +212,114 @@ pub mod cli {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils;
+
+    #[tokio::test]
+    async fn test_api_sql_handle() {
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
+
+        // Testing that dynamic_data is truncated by encoded_lengths. The tested scenarios include:
+        // 1. encoded_lengths: empty, dynamic_data: empty
+        // 2. encoded_lengths: empty, dynamic_data: non-empty
+        // 3. encoded_lengths: non-empty, dynamic_data: non-empty
+        let address = hex!("0000000000000000000000000000000000000001").as_slice();
+        let table_id =
+            hex!("74626170700000000000000000000000546573745461626c6500000000000000").as_slice();
+
+        pgtx.execute(
+            r#"INSERT INTO records (address, table_id, key, dynamic_data, static_data, encoded_lengths, block_num, log_idx, expired)
+            VALUES
+            ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000001', '\x', $4, '\x0000000000000000000000000000000000000000000000000000000000000000', 0, 0, false),
+            ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000002', $3, $4, '\x0000000000000000000000000000000000000000000000000000000000000000', 1, 0, false),
+            ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000003', $3, $4, '\x0000000000000000000000000000000000000000000000004000000000000040', 1, 0, false)"#,
+            &[
+                &address,
+                &table_id,
+                &hex!("00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002").as_slice(), // dynamic_data
+                &hex!("0000000000000000000000000000000000000000000000000000000000000002").as_slice(), // static_data
+            ],
+        )
+        .await
+        .expect("setting up records table");
+
+        pgtx.execute(
+            r#"
+            INSERT INTO tables (
+                block_num,
+                log_idx,
+                address,
+                id,
+                name,
+                key_schema,
+                val_schema,
+                key_names,
+                val_names
+            ) VALUES (
+                0,
+                0,
+                $1,
+                $2,
+                'TestTable',
+                '\x002001001F000000000000000000000000000000000000000000000000000000',
+                '\x002001011F810000000000000000000000000000000000000000000000000000',
+                '{column1}',
+                '{column2,column3}'
+            )"#,
+            &[&address, &table_id],
+        )
+        .await
+        .expect("setting up tables table");
+
+        let req = vec![Request {
+            block_height: None,
+            address: Address::from_slice(address),
+            query: "select column1, column2, column3 from app__TestTable".to_string(),
+        }];
+
+        let mut res: Vec<Rows> = Vec::new();
+        for r in req {
+            let preformatted_query = preformat_sql::preformat(&r.query);
+            let query =
+                mud_schema::query::enhance(&pgtx, r.address, r.block_height, &preformatted_query)
+                    .await
+                    .expect("enhancing query");
+
+            res.push(
+                handle_rows(pgtx.query(&dbg!(query), &[]).await.expect("querying"))
+                    .expect("handling rows"),
+            );
+        }
+
+        let query_res = &res[0];
+        let columns = &query_res[0];
+        assert_eq!(columns[0].as_str().unwrap(), "column1");
+        assert_eq!(columns[1].as_str().unwrap(), "column2");
+        assert_eq!(columns[2].as_str().unwrap(), "column3");
+
+        let empty_dynamic_data = &query_res[1];
+        assert_eq!(empty_dynamic_data[0].as_str().unwrap(), "1");
+        assert_eq!(empty_dynamic_data[1].as_str().unwrap(), "2");
+        assert_eq!(empty_dynamic_data[2], Value::Array(vec![]));
+
+        let mismatched_dynamic_data = &query_res[2];
+        assert_eq!(mismatched_dynamic_data[0].as_str().unwrap(), "2");
+        assert_eq!(mismatched_dynamic_data[1].as_str().unwrap(), "2");
+        assert_eq!(mismatched_dynamic_data[2], Value::Array(vec![]));
+
+        let non_empty_dynamic_data = &query_res[3];
+        assert_eq!(non_empty_dynamic_data[0].as_str().unwrap(), "3");
+        assert_eq!(non_empty_dynamic_data[1].as_str().unwrap(), "2");
+        assert_eq!(
+            non_empty_dynamic_data[2],
+            Value::Array(vec![
+                Value::String("1".to_string()),
+                Value::String("2".to_string())
+            ])
+        );
+    }
+}

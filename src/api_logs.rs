@@ -274,7 +274,18 @@ impl LogsQuery {
                     THEN '\x00'::bytea
                     ELSE encoded_lengths
                 END AS encoded_lengths,
-                dynamic_data,
+                CASE
+                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                    THEN '\x'::bytea
+                    ELSE substring(dynamic_data, 1,
+                         (get_byte(encoded_lengths, 25) << 48) |
+                         (get_byte(encoded_lengths, 26) << 40) |
+                         (get_byte(encoded_lengths, 27) << 32) |
+                         (get_byte(encoded_lengths, 28) << 24) |
+                         (get_byte(encoded_lengths, 29) << 16) |
+                         (get_byte(encoded_lengths, 30) << 8) |
+                         get_byte(encoded_lengths, 31))
+                END AS dynamic_data,
                 deleted
             from records
             where not expired
@@ -291,14 +302,79 @@ impl LogsQuery {
 
 #[cfg(test)]
 mod tests {
-    use sqlparser::{dialect::PostgreSqlDialect, parser::Parser};
-
     use super::*;
+    use crate::test_utils;
+    use alloy::hex;
 
-    fn fmt_sql(sql: &str) -> Result<String> {
-        const PG: &PostgreSqlDialect = &PostgreSqlDialect {};
-        let ast = Parser::parse_sql(PG, sql)?;
-        Ok(ast[0].to_string())
+    #[tokio::test]
+    async fn test_api_logs_handle() {
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
+
+        pgtx.execute(
+            r#"
+            INSERT INTO records (address, table_id, key, dynamic_data, static_data, encoded_lengths, block_num, log_idx, expired)
+            VALUES
+                ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000001', $3, $4, '\x0000000000000000000000000000000000000000000000000000000000000000', 0, 0, false),
+                ($1, $2, '\x0000000000000000000000000000000000000000000000000000000000000002', $3, $4, '\x0000000000000000000000000000000000000000000000000000000000000008', 1, 0, false)"#,
+            &[
+                &hex!("0000000000000000000000000000000000000001").as_slice(), // address
+                &hex!("74626170700000000000000000000000546573745461626c6500000000000000").as_slice(), // table_id
+                &hex!("AAAABBBBCCCCDDDDEEEEFFFF11112222333344445555666677778888DEADBEEF").as_slice(), // dynamic_data
+                &hex!("0000000000000000000000000000000000000000000000000000000000000001").as_slice(), // static_data
+            ],
+        )
+        .await
+        .expect("setting up records table");
+
+        let query = LogsQuery::new(
+            None,
+            LogsRequestInput {
+                _chain_id: Some(690),
+                address: Some(FixedBytes::<20>::with_last_byte(1)),
+                filters: Some(vec![]),
+            },
+        );
+
+        let params: &[&(dyn ToSql + Sync)] = &query
+            .params
+            .iter()
+            .map(|b| b.as_ref() as &(dyn ToSql + Sync))
+            .collect::<Vec<_>>()[..];
+
+        let res: Vec<Log> = pgtx
+            .query(&query.to_sql(false), params)
+            .await
+            .unwrap()
+            .iter()
+            .map(Log::from_row)
+            .collect::<Result<Vec<Log>, _>>()
+            .unwrap()
+            .into_iter()
+            .sorted_by_key(|l| (l.block_num, l.log_idx))
+            .collect_vec();
+
+        assert_eq!(
+            res.first().unwrap().args.dynamic_data,
+            Some(Bytes::from(FixedBytes::<0>::ZERO))
+        );
+        // dynamic_data is longer than encoded_lengths, and gets truncated by encoded_lengths
+        assert_eq!(
+            res.last().unwrap().args.dynamic_data,
+            Some(Bytes::from(fixed_bytes!("AAAABBBBCCCCDDDD")))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_next_to_index() {
+        let (_pg_server, mut pg) = test_utils::test_pg().await;
+        let pgtx = pg.transaction().await.expect("opening index tx");
+        pgtx.execute(
+            "insert into blocks(num, hash) values ($1, $2)",
+            &[&U64::from(0), &FixedBytes::<32>::ZERO],
+        )
+        .await
+        .expect("setting up blocks table");
     }
 
     #[test]
@@ -312,8 +388,8 @@ mod tests {
             },
         );
         assert_eq!(
-            fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            fmt_sql(
+            test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
+            test_utils::fmt_sql(
                 r#"
                 select
                     block_num,
@@ -327,7 +403,18 @@ mod tests {
                         THEN '\x00'::bytea
                         ELSE encoded_lengths
                     END AS encoded_lengths,
-                    dynamic_data,
+                    CASE
+                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                        THEN '\x'::bytea
+                        ELSE substring(dynamic_data, 1,
+                         (get_byte(encoded_lengths, 25) << 48) |
+                         (get_byte(encoded_lengths, 26) << 40) |
+                         (get_byte(encoded_lengths, 27) << 32) |
+                         (get_byte(encoded_lengths, 28) << 24) |
+                         (get_byte(encoded_lengths, 29) << 16) |
+                         (get_byte(encoded_lengths, 30) << 8) |
+                         get_byte(encoded_lengths, 31))
+                    END AS dynamic_data,
                     deleted
                 from records
                 where not expired
@@ -350,8 +437,8 @@ mod tests {
             },
         );
         assert_eq!(
-            fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            fmt_sql(
+            test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
+            test_utils::fmt_sql(
                 r#"
                 select
                     block_num,
@@ -365,7 +452,18 @@ mod tests {
                         THEN '\x00'::bytea
                         ELSE encoded_lengths
                     END AS encoded_lengths,
-                    dynamic_data,
+                    CASE
+                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                        THEN '\x'::bytea
+                        ELSE substring(dynamic_data, 1,
+                         (get_byte(encoded_lengths, 25) << 48) |
+                         (get_byte(encoded_lengths, 26) << 40) |
+                         (get_byte(encoded_lengths, 27) << 32) |
+                         (get_byte(encoded_lengths, 28) << 24) |
+                         (get_byte(encoded_lengths, 29) << 16) |
+                         (get_byte(encoded_lengths, 30) << 8) |
+                         get_byte(encoded_lengths, 31))
+                    END AS dynamic_data,
                     deleted
                 from records
                 where not expired
@@ -392,7 +490,9 @@ mod tests {
             },
         );
         assert_eq!(query.params.len(), 5);
-        assert_eq!(fmt_sql(&query.to_sql(false)).unwrap(), fmt_sql(r#"
+        assert_eq!(
+            test_utils::fmt_sql(&query.to_sql(false)).unwrap(),
+            test_utils::fmt_sql(r#"
             SELECT
                 block_num,
                 log_idx,
@@ -405,7 +505,18 @@ mod tests {
                     THEN '\x00'::bytea
                     ELSE encoded_lengths
                 END AS encoded_lengths,
-                dynamic_data,
+                CASE
+                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                    THEN '\x'::bytea
+                    ELSE substring(dynamic_data, 1,
+                         (get_byte(encoded_lengths, 25) << 48) |
+                         (get_byte(encoded_lengths, 26) << 40) |
+                         (get_byte(encoded_lengths, 27) << 32) |
+                         (get_byte(encoded_lengths, 28) << 24) |
+                         (get_byte(encoded_lengths, 29) << 16) |
+                         (get_byte(encoded_lengths, 30) << 8) |
+                         get_byte(encoded_lengths, 31))
+                END AS dynamic_data,
                 deleted
             FROM records
             WHERE NOT expired
