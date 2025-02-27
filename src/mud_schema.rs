@@ -124,20 +124,20 @@ pub mod query {
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
                     with "bar" as (
-                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as "value"
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
                         and not expired
                         and not deleted
                     ), "foo" as (
-                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as "value"
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
                         and not expired
                         and not deleted
-                    ) select "foo".value, "bar".value from "foo","bar" where "foo".value = "bar".value
+                    ) select "foo"."value", "bar"."value" from "foo","bar" where "foo"."value" = "bar"."value"
                 "#).unwrap()
             )
         }
@@ -156,20 +156,20 @@ pub mod query {
                 fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
                 fmt_sql(r#"
                     with "bar" as (
-                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as "value"
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x0000000000000000000000000000000062617200000000000000000000000000'
                         and not expired
                         and not deleted
                     ), "foo" as (
-                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as "value"
                         from records
                         where address = '\x0000000000000000000000000000000000000000'
                         and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
                         and not expired
                         and not deleted
-                    ) select foo.value, bar.value from "foo","bar" where foo.value = bar.value
+                    ) select "foo"."value", "bar"."value" from "foo","bar" where "foo"."value" = "bar"."value"
                 "#).unwrap()
             )
         }
