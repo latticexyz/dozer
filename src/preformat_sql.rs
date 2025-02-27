@@ -106,5 +106,10 @@ mod tests {
             preformat("SELECT store__Tables.\"tableId\" FROM store__Tables"),
             "SELECT \"store__Tables\".\"tableId\" FROM \"store__Tables\""
         );
+
+        assert_eq!(
+            preformat("SELECT \"store__Tables\".\"tableId\" FROM \"store__Tables\""),
+            "SELECT \"store__Tables\".\"tableId\" FROM \"store__Tables\""
+        );
     }
 }
