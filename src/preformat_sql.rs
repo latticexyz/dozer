@@ -22,6 +22,9 @@ pub fn preformat(query: &str) -> String {
             modify_binary_op(left);
             modify_binary_op(right);
         }
+        if let Expr::CompoundIdentifier(ident) = expr {
+            modify_qualified_table_name(ident);
+        }
         ControlFlow::<()>::Continue(())
     });
     ast[0].to_string()
@@ -41,6 +44,12 @@ fn modify_binary_op(ident: &mut Expr) {
             }
         }
         _ => {}
+    }
+}
+
+fn modify_qualified_table_name(ident: &mut Vec<Ident>) {
+    for ident in ident {
+        modify_table_name(ident);
     }
 }
 
@@ -86,6 +95,21 @@ mod tests {
         assert_eq!(
             preformat("SELECT column_1 FROM table_1 WHERE '0x1234' = column_1"),
             "SELECT column_1 FROM \"table_1\" WHERE decode('1234', 'hex') = column_1"
+        );
+
+        assert_eq!(
+            preformat("SELECT store__Tables.tableId FROM store__Tables"),
+            "SELECT \"store__Tables\".\"tableId\" FROM \"store__Tables\""
+        );
+
+        assert_eq!(
+            preformat("SELECT store__Tables.\"tableId\" FROM store__Tables"),
+            "SELECT \"store__Tables\".\"tableId\" FROM \"store__Tables\""
+        );
+
+        assert_eq!(
+            preformat("SELECT \"store__Tables\".\"tableId\" FROM \"store__Tables\""),
+            "SELECT \"store__Tables\".\"tableId\" FROM \"store__Tables\""
         );
     }
 }
