@@ -28,9 +28,10 @@ type Rows = Vec<Row>;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Request {
-    pub block_height: Option<u64>,
     pub address: Address,
     pub query: String,
+    pub block_height: Option<u64>,
+    pub block_height_direction: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -72,9 +73,14 @@ pub async fn handle(
     let mut res: Vec<Rows> = Vec::new();
     for r in req {
         let preformatted_query = preformat_sql::preformat(&r.query);
-        let query =
-            mud_schema::query::enhance(&pgtx, r.address, r.block_height, &preformatted_query)
-                .await?;
+        let query = mud_schema::query::enhance(
+            &pgtx,
+            r.address,
+            r.block_height,
+            r.block_height_direction.as_deref(),
+            &preformatted_query,
+        )
+        .await?;
 
         res.push(handle_rows(pgtx.query(&dbg!(query), &[]).await?)?);
     }
@@ -175,9 +181,10 @@ pub mod cli {
 
     pub async fn request(http_client: &Client, args: Request) -> Result<()> {
         let req_body = super::Request {
-            block_height: None,
             address: args.address,
             query: args.query,
+            block_height: None,
+            block_height_direction: None,
         };
 
         let mut req_path = args.url.clone();
@@ -276,18 +283,24 @@ mod tests {
         .expect("setting up tables table");
 
         let req = vec![Request {
-            block_height: None,
             address: Address::from_slice(address),
             query: "select column1, column2, column3 from app__TestTable".to_string(),
+            block_height: None,
+            block_height_direction: None,
         }];
 
         let mut res: Vec<Rows> = Vec::new();
         for r in req {
             let preformatted_query = preformat_sql::preformat(&r.query);
-            let query =
-                mud_schema::query::enhance(&pgtx, r.address, r.block_height, &preformatted_query)
-                    .await
-                    .expect("enhancing query");
+            let query = mud_schema::query::enhance(
+                &pgtx,
+                r.address,
+                r.block_height,
+                r.block_height_direction.as_deref(),
+                &preformatted_query,
+            )
+            .await
+            .expect("enhancing query");
 
             res.push(
                 handle_rows(pgtx.query(&dbg!(query), &[]).await.expect("querying"))
