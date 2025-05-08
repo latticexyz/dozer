@@ -34,6 +34,7 @@ pub mod query {
         pgtx: &Transaction<'_>,
         address: Address,
         block_height: Option<u64>,
+        block_height_direction: Option<&str>,
         user_query: &str,
     ) -> Result<String, api::Error> {
         let parsed_query =
@@ -42,7 +43,7 @@ pub mod query {
         if schemas.is_empty() {
             return Err(api::Error::User("schemas not found".to_string()));
         }
-        build_sql(block_height, user_query, schemas)
+        build_sql(block_height, block_height_direction, user_query, schemas)
     }
 
     async fn load_schemas(
@@ -63,6 +64,7 @@ pub mod query {
 
     fn build_sql(
         block_height: Option<u64>,
+        block_height_direction: Option<&str>,
         user_query: &str,
         schemas: Vec<Schema>,
     ) -> Result<String, api::Error> {
@@ -72,7 +74,7 @@ pub mod query {
             schemas
                 .iter()
                 .sorted_by_key(|s| s.full_name())
-                .map(|s| s.cte_sql(block_height))
+                .map(|s| s.cte_sql(block_height, block_height_direction))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(","),
             user_query.to_string(),
@@ -116,6 +118,7 @@ pub mod query {
             let preformatted_query = preformat_sql::preformat(user_query);
             let pq = build_sql(
                 None,
+                None,
                 &preformatted_query,
                 vec![test_schema("foo", "value"), test_schema("bar", "value")],
             );
@@ -147,6 +150,7 @@ pub mod query {
             let user_query = "select foo.value, bar.value from foo,bar where foo.value = bar.value";
             let preformatted_query = preformat_sql::preformat(user_query);
             let pq = build_sql(
+                None,
                 None,
                 &preformatted_query,
                 vec![test_schema("foo", "value"), test_schema("bar", "value")],
@@ -180,6 +184,7 @@ pub mod query {
             let preformatted_query = preformat_sql::preformat(user_query);
             let pq = build_sql(
                 Some(42),
+                Some(">="),
                 &preformatted_query,
                 vec![test_schema("foo", "value")],
             );
@@ -194,6 +199,32 @@ pub mod query {
                         and not expired
                         and not deleted
                         and block_num >= 42
+                    ) select value from "foo"
+                "#).unwrap()
+            )
+        }
+
+        #[test]
+        fn test_enhance_block_height_less_than() {
+            let user_query = "select value from foo";
+            let preformatted_query = preformat_sql::preformat(user_query);
+            let pq = build_sql(
+                Some(42),
+                Some("<="),
+                &preformatted_query,
+                vec![test_schema("foo", "value")],
+            );
+            assert_eq!(
+                fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
+                fmt_sql(r#"
+                    with "foo" as (
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        from records
+                        where address = '\x0000000000000000000000000000000000000000'
+                        and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
+                        and not expired
+                        and not deleted
+                        and block_num <= 42
                     ) select value from "foo"
                 "#).unwrap()
             )
@@ -672,7 +703,11 @@ impl Schema {
         self.val_schema[2] as usize
     }
 
-    pub fn cte_sql(&self, block_height: Option<u64>) -> Result<String, api::Error> {
+    pub fn cte_sql(
+        &self,
+        block_height: Option<u64>,
+        block_height_direction: Option<&str>,
+    ) -> Result<String, api::Error> {
         let mut res: Vec<String> = Vec::new();
         res.push(format!("\"{}\" as (", self.full_name()));
         res.push("select".to_string());
@@ -686,7 +721,8 @@ impl Schema {
             );
         }
         let block_height = if let Some(h) = block_height {
-            format!("and block_num >= {}", h)
+            let direction = block_height_direction.unwrap_or(">=");
+            format!("and block_num {} {}", direction, h)
         } else {
             String::new()
         };
