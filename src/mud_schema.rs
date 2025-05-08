@@ -184,6 +184,32 @@ pub mod query {
             let preformatted_query = preformat_sql::preformat(user_query);
             let pq = build_sql(
                 Some(42),
+                None,
+                &preformatted_query,
+                vec![test_schema("foo", "value")],
+            );
+            assert_eq!(
+                fmt_sql(&pq.unwrap()).expect("parsing generated sql"),
+                fmt_sql(r#"
+                    with "foo" as (
+                        select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
+                        from records
+                        where address = '\x0000000000000000000000000000000000000000'
+                        and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
+                        and not expired
+                        and not deleted
+                        and block_num >= 42
+                    ) select value from "foo"
+                "#).unwrap()
+            )
+        }
+
+        #[test]
+        fn test_enhance_block_height_greater_equal_than() {
+            let user_query = "select value from foo";
+            let preformatted_query = preformat_sql::preformat(user_query);
+            let pq = build_sql(
+                Some(42),
                 Some(">="),
                 &preformatted_query,
                 vec![test_schema("foo", "value")],
@@ -219,12 +245,19 @@ pub mod query {
                 fmt_sql(r#"
                     with "foo" as (
                         select coalesce(b2n(sdec(static_data, 0, 4)), 0) as value
-                        from records
-                        where address = '\x0000000000000000000000000000000000000000'
-                        and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
-                        and not expired
-                        and not deleted
-                        and block_num <= 42
+                        from (
+                            select *,
+                                row_number() over (
+                                    partition by address, table_id, key
+                                    order by block_num desc, log_idx desc
+                                ) as row_number
+                            from records
+                            where address = '\x0000000000000000000000000000000000000000'
+                            and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
+                            and not deleted
+                            and block_num <= 42
+                        ) latest_records
+                        where row_number = 1
                     ) select value from "foo"
                 "#).unwrap()
             )
@@ -721,7 +754,10 @@ impl Schema {
             );
         }
 
-        let query = if block_height.is_some() && block_height_direction.is_some() {
+        let query = if block_height.is_some()
+            && block_height_direction.is_some()
+            && block_height_direction.unwrap() != ">="
+        {
             format!(
                 r#"
                 from (
@@ -729,14 +765,14 @@ impl Schema {
                         row_number() over (
                             partition by address, table_id, key
                             order by block_num desc, log_idx desc
-                        ) as rn
+                        ) as row_number
                     from records
                     where address = '\x{}'
                     and table_id = '\x{}'
                     and not deleted
                     and block_num {} {}
                 ) latest_records
-                where rn = 1
+                where row_number = 1
                 "#,
                 hex::encode(self.address),
                 hex::encode(self.table_id),
