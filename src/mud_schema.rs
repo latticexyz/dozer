@@ -720,25 +720,46 @@ impl Schema {
                     .join(","),
             );
         }
-        let block_height = if let Some(h) = block_height {
-            let direction = block_height_direction.unwrap_or(">=");
-            format!("and block_num {} {}", direction, h)
+
+        let query = if block_height.is_some() && block_height_direction.is_some() {
+            format!(
+                r#"
+                from (
+                    select *,
+                        row_number() over (
+                            partition by address, table_id, key
+                            order by block_num desc, log_idx desc
+                        ) as rn
+                    from records
+                    where address = '\x{}'
+                    and table_id = '\x{}'
+                    and not deleted
+                    and block_num {} {}
+                ) latest_records
+                where rn = 1
+                "#,
+                hex::encode(self.address),
+                hex::encode(self.table_id),
+                block_height_direction.unwrap(),
+                block_height.unwrap()
+            )
         } else {
-            String::new()
+            format!(
+                r#"
+                from records
+                where address = '\x{}'
+                and table_id = '\x{}'
+                and not expired
+                and not deleted
+                {}
+                "#,
+                hex::encode(self.address),
+                hex::encode(self.table_id),
+                block_height.map_or(String::new(), |h| format!("and block_num >= {}", h))
+            )
         };
-        res.push(format!(
-            r#"
-            from records
-            where address = '\x{}'
-            and table_id = '\x{}'
-            and not expired
-            and not deleted
-            {}
-            "#,
-            hex::encode(self.address),
-            hex::encode(self.table_id),
-            block_height,
-        ));
+
+        res.push(query);
         res.push(")".to_string());
         Ok(res.join(" "))
     }
