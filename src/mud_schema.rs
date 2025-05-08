@@ -254,10 +254,10 @@ pub mod query {
                             from records
                             where address = '\x0000000000000000000000000000000000000000'
                             and table_id = '\x00000000000000000000000000000000666f6f00000000000000000000000000'
-                            and not deleted
                             and block_num <= 42
                         ) latest_records
                         where row_number = 1
+                        and not deleted
                     ) select value from "foo"
                 "#).unwrap()
             )
@@ -769,10 +769,10 @@ impl Schema {
                     from records
                     where address = '\x{}'
                     and table_id = '\x{}'
-                    and not deleted
                     and block_num {} {}
                 ) latest_records
                 where row_number = 1
+                and not deleted
                 "#,
                 hex::encode(self.address),
                 hex::encode(self.table_id),
