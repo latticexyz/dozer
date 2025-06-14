@@ -38,6 +38,66 @@ use url::Url;
 
 static SCHEMA: &str = include_str!("./schema.sql");
 
+#[derive(Debug)]
+struct AdaptiveBatchSize {
+    current: u64,
+    default: u64,
+    min: u64,
+    consecutive_successes: u32,
+    recovery_threshold: u32,
+}
+
+impl AdaptiveBatchSize {
+    fn new(default: u64) -> Self {
+        Self {
+            current: default,
+            default,
+            min: 1,
+            consecutive_successes: 0,
+            recovery_threshold: 5,
+        }
+    }
+
+    fn reduce_for_large_response(&mut self) -> u64 {
+        self.current = std::cmp::max(self.min, self.current / 2);
+        self.consecutive_successes = 0;
+        tracing::warn!(
+            "Reduced batch size to {} due to 'response too large' error",
+            self.current
+        );
+        self.current
+    }
+
+    fn reduce_for_retry(&mut self) -> u64 {
+        self.current = std::cmp::max(self.min, self.current / 10);
+        self.consecutive_successes = 0;
+        tracing::warn!("Reduced batch size to {} due to retry error", self.current);
+        self.current
+    }
+
+    fn on_success(&mut self) -> u64 {
+        self.consecutive_successes += 1;
+        
+        if self.consecutive_successes >= self.recovery_threshold && self.current < self.default {
+            let old_size = self.current;
+            self.current = std::cmp::min(self.default, self.current * 2);
+            self.consecutive_successes = 0;
+            tracing::info!(
+                "Increased batch size from {} to {} after {} consecutive successes",
+                old_size,
+                self.current,
+                self.recovery_threshold
+            );
+        }
+        
+        self.current
+    }
+
+    fn get(&self) -> u64 {
+        self.current
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "dozer", about = "An indexer for MUD", version = "0.1")]
 struct Dozer {
@@ -283,14 +343,13 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
             println!("unable lock for indexing: {}", err);
             return;
         }
-        //TODO: this is a workaround for the redstone RPC API not having a reliable
-        //block range limit for the eth_getLogs request.
-        let mut batch_size = args.batch_size;
+        let mut adaptive_batch = AdaptiveBatchSize::new(args.batch_size);
         loop {
-            match indexer::index(&eth_client, &mut w_pg, batch_size).await {
+            let current_batch_size = adaptive_batch.get();
+            match indexer::index(&eth_client, &mut w_pg, current_batch_size).await {
                 Ok(next) => {
                     config.broadcaster.broadcast(next);
-                    batch_size = args.batch_size
+                    adaptive_batch.on_success();
                 }
                 Err(indexer::IndexError::NothingNew(n)) => {
                     tracing::info!("nothing new. latest: {}", n);
@@ -300,8 +359,13 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
                     tracing::error!(%e, "An error occurred: {:?}", e);
                     std::process::exit(1);
                 }
+                Err(indexer::IndexError::RetryWithSmallerBatch(e)) => {
+                    adaptive_batch.reduce_for_large_response();
+                    tracing::error!("indexer retry with smaller batch: {:?}", e.to_string());
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
                 Err(indexer::IndexError::Retry(e)) => {
-                    batch_size = std::cmp::max(1, batch_size / 10);
+                    adaptive_batch.reduce_for_retry();
                     tracing::error!("indexer retry: {:?}", e.to_string());
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
