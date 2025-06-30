@@ -189,7 +189,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
     });
 
     let eth_client = ProviderBuilder::new().on_http(args.eth_url);
-    {
+    if !args.no_index {
         let pgtx = w_pg
             .transaction()
             .await
