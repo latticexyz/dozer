@@ -138,9 +138,19 @@ pub async fn handle(
     let include_tx_hash = query.include_tx_hash;
     let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
 
+    let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
+
+    let latest_block: Option<u64> = if query.to_block_num.is_none() {
+        let row = pg.query_one("select max(num) from blocks", &[]).await?;
+        let val: U64 = row.get(0);
+        Some(val.try_into().unwrap())
+    } else {
+        None
+    };
+
     // fall back to `block_num` for backwards-compatibility
     let from_block = query.from_block_num.or(query.block_num);
-    let to_block = query.to_block_num;
+    let to_block = query.to_block_num.or(latest_block);
 
     let query = LogsQuery::new(from_block, to_block, req_input);
 
@@ -150,7 +160,6 @@ pub async fn handle(
         .map(|b| b.as_ref() as &(dyn ToSql + Sync))
         .collect::<Vec<_>>()[..];
 
-    let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
     let res: Vec<Log> = pg
         .query(&query.to_sql(include_tx_hash.unwrap_or(false)), params)
         .await?
@@ -161,9 +170,8 @@ pub async fn handle(
         .sorted_by_key(|l| (l.block_num, l.log_idx))
         .collect_vec();
 
-    let bres = pg.query_one("select max(num) from blocks", &[]).await?;
     Ok(Json(LogsResponse {
-        block_num: bres.get::<usize, U64>(0).to(),
+        block_num: to_block.unwrap().into(),
         logs: res,
     }))
 }
