@@ -29,7 +29,9 @@ where
 #[derive(Clone, Deserialize, Debug)]
 pub struct LogsRequest {
     input: String,
-    block_num: Option<u64>,
+    from_block_num: Option<u64>,
+    to_block_num: Option<u64>,
+    block_num: Option<u64>, // deprecated, but kept for backwards compat
     include_tx_hash: Option<bool>,
 }
 
@@ -135,7 +137,12 @@ pub async fn handle(
 ) -> Result<Json<LogsResponse>, api::Error> {
     let include_tx_hash = query.include_tx_hash;
     let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
-    let query = LogsQuery::new(query.block_num, req_input);
+
+    // fall back to `block_num` for backwards-compatibility
+    let from_block = query.from_block_num.or(query.block_num);
+    let to_block = query.to_block_num;
+
+    let query = LogsQuery::new(from_block, to_block, req_input);
 
     let params: &[&(dyn ToSql + Sync)] = &query
         .params
@@ -181,7 +188,8 @@ type Param = (dyn ToSql + Sync + Send);
 
 #[derive(Default, Debug)]
 struct LogsQuery {
-    min_block_num: Option<u64>,
+    from_block_num: Option<u64>,
+    to_block_num: Option<u64>,
     or_predicates: Vec<String>,
     and_predicates: Vec<String>,
     num_params: i32,
@@ -189,9 +197,14 @@ struct LogsQuery {
 }
 
 impl LogsQuery {
-    fn new(min_block_num: Option<u64>, input: LogsRequestInput) -> Self {
+    fn new(
+        from_block_num: Option<u64>,
+        to_block_num: Option<u64>,
+        input: LogsRequestInput,
+    ) -> Self {
         let mut query = LogsQuery {
-            min_block_num,
+            from_block_num,
+            to_block_num,
             num_params: 0,
             and_predicates: vec![],
             or_predicates: vec![],
@@ -249,16 +262,25 @@ impl LogsQuery {
     }
 
     fn to_sql(&self, include_tx_hash: bool) -> String {
-        let block_num_predicate = if let Some(n) = self.min_block_num {
-            format!("and block_num >= {}", n)
+        let to_block_predicate = if let Some(to_block) = self.to_block_num {
+            format!("and block_num <= {}", to_block)
         } else {
+            String::new()
+        };
+
+        let from_block_predicate = if let Some(from_block) = self.from_block_num {
+            format!("and block_num >= {}", from_block)
+        } else {
+            // fallback ensures we only return current state if no lower bound is given
             String::from("and not deleted")
         };
+
         let tx_hash = if include_tx_hash {
             String::from("tx_hash,")
         } else {
             String::new()
         };
+
         format!(
             r#"
             select
@@ -278,23 +300,28 @@ impl LogsQuery {
                     WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
                     THEN '\x'::bytea
                     ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
+                        (get_byte(encoded_lengths, 25) << 48) |
+                        (get_byte(encoded_lengths, 26) << 40) |
+                        (get_byte(encoded_lengths, 27) << 32) |
+                        (get_byte(encoded_lengths, 28) << 24) |
+                        (get_byte(encoded_lengths, 29) << 16) |
+                        (get_byte(encoded_lengths, 30) << 8) |
+                        get_byte(encoded_lengths, 31))
                 END AS dynamic_data,
                 deleted
-            from records
-            where not expired
-            and address = $1
-            {}
-            {}
+            from (
+                select distinct on (table_id, key) *
+                from records
+                where address = $1
+                {}
+                {}
+                {}
+                order by table_id, key, block_num desc, log_idx desc
+            ) as latest
             "#,
             tx_hash,
-            block_num_predicate,
+            to_block_predicate,
+            from_block_predicate,
             self.filters_sql()
         )
     }
@@ -328,6 +355,7 @@ mod tests {
         .expect("setting up records table");
 
         let query = LogsQuery::new(
+            None,
             None,
             LogsRequestInput {
                 _chain_id: Some(690),
@@ -381,6 +409,7 @@ mod tests {
     fn test_logs_query_empty_filters() {
         let query = LogsQuery::new(
             None,
+            None,
             LogsRequestInput {
                 _chain_id: Some(690),
                 address: Some(FixedBytes::<20>::with_last_byte(1)),
@@ -427,8 +456,9 @@ mod tests {
     }
 
     #[test]
-    fn test_logs_query_min_block_num() {
+    fn test_logs_query_from_block_num() {
         let query = LogsQuery::new(
+            None,
             Some(42),
             LogsRequestInput {
                 _chain_id: Some(690),
@@ -478,6 +508,7 @@ mod tests {
     #[test]
     fn test_logs_query() {
         let query = LogsQuery::new(
+            None,
             None,
             LogsRequestInput {
                 _chain_id: Some(690),
