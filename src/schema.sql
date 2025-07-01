@@ -94,7 +94,7 @@ include (deleted);
 -- for faster snapshots for DUST world
 create index concurrently if not exists "dust_records_latest"
 on records(table_id, key, block_num desc, log_idx desc)
-include (deleted)
+include (address, deleted)
 where address = '\x253eb85b3c953bfe3827cc14a151262482e7189c';
 
 create table if not exists tables(

@@ -237,7 +237,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
 
     let service = tower::ServiceBuilder::new()
         .layer(tracing)
-        .layer(TimeoutLayer::new(Duration::from_secs(60)))
+        .layer(TimeoutLayer::new(Duration::from_secs(60 * 5)))
         .layer(CompressionLayer::new());
 
     let (app, listener) = (

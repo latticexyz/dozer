@@ -280,7 +280,8 @@ impl LogsQuery {
             format!("and block_num >= {}", from_block)
         } else {
             // fallback ensures we only return current state if no lower bound is given
-            String::from("and not deleted")
+            // String::from("and not deleted")
+            String::new()
         };
 
         let tx_hash = if include_tx_hash {
@@ -289,49 +290,54 @@ impl LogsQuery {
             String::new()
         };
 
-        format!(
+        let sql = format!(
             r#"
             select
-                block_num,
-                {}
-                log_idx,
-                address,
-                table_id,
-                key,
-                static_data,
+                r.block_num,
+                r.log_idx,
+                {tx_hash}
+                r.address,
+                r.table_id,
+                r.key,
+                r.static_data,
                 CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                    WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
                     THEN '\x00'::bytea
-                    ELSE encoded_lengths
+                    ELSE r.encoded_lengths
                 END AS encoded_lengths,
                 CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
+                    WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
                     THEN '\x'::bytea
-                    ELSE substring(dynamic_data, 1,
-                        (get_byte(encoded_lengths, 25) << 48) |
-                        (get_byte(encoded_lengths, 26) << 40) |
-                        (get_byte(encoded_lengths, 27) << 32) |
-                        (get_byte(encoded_lengths, 28) << 24) |
-                        (get_byte(encoded_lengths, 29) << 16) |
-                        (get_byte(encoded_lengths, 30) << 8) |
-                        get_byte(encoded_lengths, 31))
+                    ELSE substring(r.dynamic_data, 1,
+                        (get_byte(r.encoded_lengths, 25) << 48) |
+                        (get_byte(r.encoded_lengths, 26) << 40) |
+                        (get_byte(r.encoded_lengths, 27) << 32) |
+                        (get_byte(r.encoded_lengths, 28) << 24) |
+                        (get_byte(r.encoded_lengths, 29) << 16) |
+                        (get_byte(r.encoded_lengths, 30) << 8) |
+                        get_byte(r.encoded_lengths, 31))
                 END AS dynamic_data,
-                deleted
+                r.deleted
             from (
-                select distinct on (table_id, key) *
+                select distinct on (table_id, key)
+                    address, table_id, key, block_num, log_idx
                 from records
                 where address = $1
-                {}
-                {}
-                {}
+                {to_block_predicate}
+                {from_block_predicate}
+                {filters}
                 order by table_id, key, block_num desc, log_idx desc
-            ) as latest
+            ) latest
+            join records r using (address, table_id, key, block_num, log_idx)
+            order by block_num, log_idx, address, table_id, key
             "#,
-            tx_hash,
-            to_block_predicate,
-            from_block_predicate,
-            self.filters_sql()
-        )
+            tx_hash = tx_hash,
+            to_block_predicate = to_block_predicate,
+            from_block_predicate = from_block_predicate,
+            filters = self.filters_sql()
+        );
+        tracing::info!("SQL:\n\n{}", sql);
+        return sql;
     }
 }
 
