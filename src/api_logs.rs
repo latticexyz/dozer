@@ -332,7 +332,7 @@ impl LogsQuery {
             from_block_predicate = from_block_predicate,
             filters = self.filters_sql()
         );
-        tracing::info!("SQL:\n\n{}", sql);
+
         return sql;
     }
 }
@@ -428,48 +428,61 @@ mod tests {
         );
         assert_eq!(
             test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            test_utils::fmt_sql(
-                r#"
-                select
+            test_utils::fmt_sql(r#"
+                SELECT
+                    r.block_num,
+                    r.log_idx,
+                    r.address,
+                    r.table_id,
+                    r.key,
+                    r.static_data,
+                    CASE
+                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x00'::BYTEA
+                        ELSE r.encoded_lengths
+                    END AS encoded_lengths,
+                    CASE
+                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x'::BYTEA
+                        ELSE SUBSTRING(
+                            r.dynamic_data,
+                            1,
+                            (get_byte(r.encoded_lengths, 25) << 48) | (get_byte(r.encoded_lengths, 26) << 40) | (get_byte(r.encoded_lengths, 27) << 32) | (get_byte(r.encoded_lengths, 28) << 24) | (get_byte(r.encoded_lengths, 29) << 16) | (get_byte(r.encoded_lengths, 30) << 8) | get_byte(r.encoded_lengths, 31)
+                        )
+                    END AS dynamic_data,
+                    r.deleted
+                FROM
+                    (
+                        SELECT DISTINCT
+                            ON (table_id, key) address,
+                            table_id,
+                            key,
+                            block_num,
+                            log_idx
+                        FROM
+                            records
+                        WHERE
+                            address = $1
+                        ORDER BY
+                            table_id,
+                            key,
+                            block_num DESC,
+                            log_idx DESC
+                    ) AS latest
+                    JOIN records AS r USING (address, table_id, key, block_num, log_idx)
+                ORDER BY
                     block_num,
                     log_idx,
                     address,
                     table_id,
-                    key,
-                    static_data,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x00'::bytea
-                        ELSE encoded_lengths
-                    END AS encoded_lengths,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x'::bytea
-                        ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
-                    END AS dynamic_data,
-                    deleted
-                from records
-                where not expired
-                and address = $1
-                and not deleted
-                "#
-            )
-            .unwrap()
+                    key
+            "#).unwrap()
         );
     }
 
     #[test]
     fn test_logs_query_from_block_num() {
         let query = LogsQuery::new(
-            None,
             Some(42),
+            None,
             LogsRequestInput {
                 _chain_id: Some(690),
                 address: Some(FixedBytes::<20>::with_last_byte(1)),
@@ -478,40 +491,54 @@ mod tests {
         );
         assert_eq!(
             test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            test_utils::fmt_sql(
-                r#"
-                select
+            test_utils::fmt_sql(r#"
+                SELECT
+                    r.block_num,
+                    r.log_idx,
+                    r.address,
+                    r.table_id,
+                    r.key,
+                    r.static_data,
+                    CASE
+                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x00'::BYTEA
+                        ELSE r.encoded_lengths
+                    END AS encoded_lengths,
+                    CASE
+                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x'::BYTEA
+                        ELSE SUBSTRING(
+                            r.dynamic_data,
+                            1,
+                            (get_byte(r.encoded_lengths, 25) << 48) | (get_byte(r.encoded_lengths, 26) << 40) | (get_byte(r.encoded_lengths, 27) << 32) | (get_byte(r.encoded_lengths, 28) << 24) | (get_byte(r.encoded_lengths, 29) << 16) | (get_byte(r.encoded_lengths, 30) << 8) | get_byte(r.encoded_lengths, 31)
+                        )
+                    END AS dynamic_data,
+                    r.deleted
+                FROM
+                    (
+                        SELECT DISTINCT
+                            ON (table_id, key) address,
+                            table_id,
+                            key,
+                            block_num,
+                            log_idx
+                        FROM
+                            records
+                        WHERE
+                            address = $1
+                            AND block_num >= 42
+                        ORDER BY
+                            table_id,
+                            key,
+                            block_num DESC,
+                            log_idx DESC
+                    ) AS latest
+                    JOIN records AS r USING (address, table_id, key, block_num, log_idx)
+                ORDER BY
                     block_num,
                     log_idx,
                     address,
                     table_id,
-                    key,
-                    static_data,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x00'::bytea
-                        ELSE encoded_lengths
-                    END AS encoded_lengths,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x'::bytea
-                        ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
-                    END AS dynamic_data,
-                    deleted
-                from records
-                where not expired
-                and address = $1
-                and block_num >= 42
-                "#
-            )
-            .unwrap()
+                    key
+            "#).unwrap()
         );
     }
 
@@ -534,39 +561,59 @@ mod tests {
         assert_eq!(
             test_utils::fmt_sql(&query.to_sql(false)).unwrap(),
             test_utils::fmt_sql(r#"
-            SELECT
-                block_num,
-                log_idx,
-                address,
-                table_id,
-                key,
-                static_data,
-                CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x00'::bytea
-                    ELSE encoded_lengths
-                END AS encoded_lengths,
-                CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x'::bytea
-                    ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
-                END AS dynamic_data,
-                deleted
-            FROM records
-            WHERE NOT expired
-            AND address = $1
-            AND NOT deleted
-            AND (
-                (table_id = $2 AND sdec(key, 0, 32) = $3 AND sdec(key, 32, 32) = $4)
-                OR
-                (table_id = $5)
-        )"#).unwrap());
+                SELECT
+                    r.block_num,
+                    r.log_idx,
+                    r.address,
+                    r.table_id,
+                    r.key,
+                    r.static_data,
+                    CASE
+                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x00'::BYTEA
+                        ELSE r.encoded_lengths
+                    END AS encoded_lengths,
+                    CASE
+                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x'::BYTEA
+                        ELSE SUBSTRING(
+                            r.dynamic_data,
+                            1,
+                            (get_byte(r.encoded_lengths, 25) << 48) | (get_byte(r.encoded_lengths, 26) << 40) | (get_byte(r.encoded_lengths, 27) << 32) | (get_byte(r.encoded_lengths, 28) << 24) | (get_byte(r.encoded_lengths, 29) << 16) | (get_byte(r.encoded_lengths, 30) << 8) | get_byte(r.encoded_lengths, 31)
+                        )
+                    END AS dynamic_data,
+                    r.deleted
+                FROM
+                    (
+                        SELECT DISTINCT
+                            ON (table_id, key) address,
+                            table_id,
+                            key,
+                            block_num,
+                            log_idx
+                        FROM
+                            records
+                        WHERE
+                            address = $1
+                            AND (
+                                (
+                                    table_id = $2
+                                    AND sdec (key, 0, 32) = $3
+                                    AND sdec (key, 32, 32) = $4
+                                )
+                                OR (table_id = $5)
+                            )
+                        ORDER BY
+                            table_id,
+                            key,
+                            block_num DESC,
+                            log_idx DESC
+                    ) AS latest
+                    JOIN records AS r USING (address, table_id, key, block_num, log_idx)
+                ORDER BY
+                    block_num,
+                    log_idx,
+                    address,
+                    table_id,
+                    key
+            "#).unwrap());
     }
 }
