@@ -279,8 +279,6 @@ impl LogsQuery {
         let from_block_predicate = if let Some(from_block) = self.from_block_num {
             format!("and block_num >= {}", from_block)
         } else {
-            // fallback ensures we only return current state if no lower bound is given
-            // String::from("and not deleted")
             String::new()
         };
 
