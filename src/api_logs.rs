@@ -140,17 +140,15 @@ pub async fn handle(
 
     let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
 
-    let latest_block: Option<u64> = if query.to_block_num.is_none() {
-        let row = pg.query_one("select max(num) from blocks", &[]).await?;
-        let val: U64 = row.get(0);
-        Some(val.try_into().unwrap())
-    } else {
-        None
-    };
-
     // fall back to `block_num` for backwards-compatibility
     let from_block = query.from_block_num.or(query.block_num);
-    let to_block = query.to_block_num.or(latest_block);
+    let to_block = match query.to_block_num {
+        Some(to) => Some(to),
+        None => {
+            let row = pg.query_one("select max(num) from blocks", &[]).await?;
+            Some(row.get::<_, U64>(0).try_into().unwrap())
+        }
+    };
 
     let query = LogsQuery::new(from_block, to_block, req_input);
 
