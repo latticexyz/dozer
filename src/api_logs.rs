@@ -74,13 +74,26 @@ impl Log {
         let (ename, sd, el, dd) = if row.get("deleted") {
             (String::from("Store_DeleteRecord"), None, None, None)
         } else {
+            let encoded_lengths_raw: Vec<u8> = row.try_get("encoded_lengths")?;
+            let dynamic_data_raw: Vec<u8> = row.try_get("dynamic_data")?;
+            let static_data = Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?);
+
+            let dynamic_data = if encoded_lengths_raw == [0u8; 32] {
+                Bytes::new()
+            } else {
+                let len = {
+                    let mut len_bytes = [0u8; 8];
+                    len_bytes[1..].copy_from_slice(&encoded_lengths_raw[25..]);
+                    usize::from_be_bytes(len_bytes)
+                };
+                Bytes::copy_from_slice(&dynamic_data_raw[..len.min(dynamic_data_raw.len())])
+            };
+
             (
                 String::from("Store_SetRecord"),
-                Some(Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?)),
-                Some(Bytes::from(
-                    row.try_get::<&str, Vec<u8>>("encoded_lengths")?,
-                )),
-                Some(Bytes::from(row.try_get::<&str, Vec<u8>>("dynamic_data")?)),
+                Some(static_data),
+                Some(Bytes::from(encoded_lengths_raw)),
+                Some(dynamic_data),
             )
         };
         Ok(Log {
@@ -296,23 +309,8 @@ impl LogsQuery {
                 r.table_id,
                 r.key,
                 r.static_data,
-                CASE
-                    WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x00'::bytea
-                    ELSE r.encoded_lengths
-                END AS encoded_lengths,
-                CASE
-                    WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x'::bytea
-                    ELSE substring(r.dynamic_data, 1,
-                        (get_byte(r.encoded_lengths, 25) << 48) |
-                        (get_byte(r.encoded_lengths, 26) << 40) |
-                        (get_byte(r.encoded_lengths, 27) << 32) |
-                        (get_byte(r.encoded_lengths, 28) << 24) |
-                        (get_byte(r.encoded_lengths, 29) << 16) |
-                        (get_byte(r.encoded_lengths, 30) << 8) |
-                        get_byte(r.encoded_lengths, 31))
-                END AS dynamic_data,
+                r.encoded_lengths,
+                r.dynamic_data,
                 r.deleted
             from (
                 select distinct on (table_id, key)
@@ -428,7 +426,8 @@ mod tests {
         );
         assert_eq!(
             test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            test_utils::fmt_sql(r#"
+            test_utils::fmt_sql(
+                r#"
                 SELECT
                     r.block_num,
                     r.log_idx,
@@ -436,18 +435,8 @@ mod tests {
                     r.table_id,
                     r.key,
                     r.static_data,
-                    CASE
-                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x00'::BYTEA
-                        ELSE r.encoded_lengths
-                    END AS encoded_lengths,
-                    CASE
-                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x'::BYTEA
-                        ELSE SUBSTRING(
-                            r.dynamic_data,
-                            1,
-                            (get_byte(r.encoded_lengths, 25) << 48) | (get_byte(r.encoded_lengths, 26) << 40) | (get_byte(r.encoded_lengths, 27) << 32) | (get_byte(r.encoded_lengths, 28) << 24) | (get_byte(r.encoded_lengths, 29) << 16) | (get_byte(r.encoded_lengths, 30) << 8) | get_byte(r.encoded_lengths, 31)
-                        )
-                    END AS dynamic_data,
+                    r.encoded_lengths,
+                    r.dynamic_data,
                     r.deleted
                 FROM
                     (
@@ -474,7 +463,9 @@ mod tests {
                     address,
                     table_id,
                     key
-            "#).unwrap()
+                "#
+            )
+            .unwrap()
         );
     }
 
@@ -491,7 +482,8 @@ mod tests {
         );
         assert_eq!(
             test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
-            test_utils::fmt_sql(r#"
+            test_utils::fmt_sql(
+                r#"
                 SELECT
                     r.block_num,
                     r.log_idx,
@@ -499,18 +491,8 @@ mod tests {
                     r.table_id,
                     r.key,
                     r.static_data,
-                    CASE
-                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x00'::BYTEA
-                        ELSE r.encoded_lengths
-                    END AS encoded_lengths,
-                    CASE
-                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x'::BYTEA
-                        ELSE SUBSTRING(
-                            r.dynamic_data,
-                            1,
-                            (get_byte(r.encoded_lengths, 25) << 48) | (get_byte(r.encoded_lengths, 26) << 40) | (get_byte(r.encoded_lengths, 27) << 32) | (get_byte(r.encoded_lengths, 28) << 24) | (get_byte(r.encoded_lengths, 29) << 16) | (get_byte(r.encoded_lengths, 30) << 8) | get_byte(r.encoded_lengths, 31)
-                        )
-                    END AS dynamic_data,
+                    r.encoded_lengths,
+                    r.dynamic_data,
                     r.deleted
                 FROM
                     (
@@ -538,7 +520,9 @@ mod tests {
                     address,
                     table_id,
                     key
-            "#).unwrap()
+                "#
+            )
+            .unwrap()
         );
     }
 
@@ -560,7 +544,8 @@ mod tests {
         assert_eq!(query.params.len(), 5);
         assert_eq!(
             test_utils::fmt_sql(&query.to_sql(false)).unwrap(),
-            test_utils::fmt_sql(r#"
+            test_utils::fmt_sql(
+                r#"
                 SELECT
                     r.block_num,
                     r.log_idx,
@@ -568,18 +553,8 @@ mod tests {
                     r.table_id,
                     r.key,
                     r.static_data,
-                    CASE
-                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x00'::BYTEA
-                        ELSE r.encoded_lengths
-                    END AS encoded_lengths,
-                    CASE
-                        WHEN r.encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::BYTEA THEN '\x'::BYTEA
-                        ELSE SUBSTRING(
-                            r.dynamic_data,
-                            1,
-                            (get_byte(r.encoded_lengths, 25) << 48) | (get_byte(r.encoded_lengths, 26) << 40) | (get_byte(r.encoded_lengths, 27) << 32) | (get_byte(r.encoded_lengths, 28) << 24) | (get_byte(r.encoded_lengths, 29) << 16) | (get_byte(r.encoded_lengths, 30) << 8) | get_byte(r.encoded_lengths, 31)
-                        )
-                    END AS dynamic_data,
+                    r.encoded_lengths,
+                    r.dynamic_data,
                     r.deleted
                 FROM
                     (
@@ -614,6 +589,9 @@ mod tests {
                     address,
                     table_id,
                     key
-            "#).unwrap());
+                "#
+            )
+            .unwrap()
+        );
     }
 }
