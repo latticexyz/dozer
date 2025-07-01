@@ -175,6 +175,7 @@ pub async fn handle(
         .query(&query.to_sql(include_tx_hash.unwrap_or(false)), params)
         .await?
         .iter()
+        .filter(|row| query.from_block_num.is_some() || !row.get::<_, bool>("deleted"))
         .map(Log::from_row)
         .collect::<Result<Vec<Log>, _>>()?
         .into_iter()
@@ -281,14 +282,14 @@ impl LogsQuery {
     }
 
     fn to_sql(&self, include_tx_hash: bool) -> String {
-        let to_block_predicate = if let Some(to_block) = self.to_block_num {
-            format!("and block_num <= {}", to_block)
+        let from_block_predicate = if let Some(from_block) = self.from_block_num {
+            format!("and block_num >= {}", from_block)
         } else {
             String::new()
         };
 
-        let from_block_predicate = if let Some(from_block) = self.from_block_num {
-            format!("and block_num >= {}", from_block)
+        let to_block_predicate = if let Some(to_block) = self.to_block_num {
+            format!("and block_num <= {}", to_block)
         } else {
             String::new()
         };
