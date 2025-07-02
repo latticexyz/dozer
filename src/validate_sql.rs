@@ -272,7 +272,7 @@ impl Validator {
 
     fn validate_function(&mut self, function: &ast::Function) -> Result<(), api::Error> {
         let name = function.name.to_string().to_lowercase();
-        const VALID_FUNCS: [&str; 31] = [
+        const VALID_FUNCS: [&str; 33] = [
             "decode",
             // Aggregate Functions
             "count",
@@ -309,6 +309,8 @@ impl Validator {
             "nullif",
             // Math Functions
             "round",
+            "abs",
+            "power",
         ];
 
         if !VALID_FUNCS.contains(&name.as_str()) {
