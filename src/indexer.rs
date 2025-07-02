@@ -62,6 +62,7 @@ sol! {
 #[derive(Debug)]
 pub enum IndexError {
     Retry(eyre::Report),
+    RetryWithSmallerBatch(eyre::Report),
     Fatal(eyre::Report),
     NothingNew(u64),
 }
@@ -69,6 +70,20 @@ pub enum IndexError {
 impl From<eyre::Report> for IndexError {
     fn from(err: eyre::Report) -> Self {
         IndexError::Fatal(err)
+    }
+}
+
+fn is_response_too_large_error(error_msg: &str) -> bool {
+    let error_lower = error_msg.to_lowercase();
+    error_lower.contains("backend response too large") 
+}
+
+fn map_rpc_error(err: impl std::error::Error + Send + Sync + 'static) -> IndexError {
+    let error_msg = err.to_string();
+    if is_response_too_large_error(&error_msg) {
+        IndexError::RetryWithSmallerBatch(eyre::Report::from(err))
+    } else {
+        IndexError::Retry(eyre::Report::from(err))
     }
 }
 
@@ -135,7 +150,7 @@ impl EthApi for ReqwestProvider {
     async fn block(&self, n: BlockNumberOrTag) -> eyre::Result<Block, IndexError> {
         self.get_block_by_number(n, false)
             .await
-            .map_err(|err| IndexError::Retry(eyre::Report::from(err)))?
+            .map_err(map_rpc_error)?
             .ok_or(IndexError::Retry(eyre!("no block found")))
     }
 
@@ -163,9 +178,23 @@ impl EthApi for ReqwestProvider {
         let (_block, logs) = (
             block
                 .await
-                .map_err(|e| IndexError::Retry(eyre!("block {}", e)))?,
+                .map_err(|e| {
+                    let error_msg = format!("block {}", e);
+                    if is_response_too_large_error(&error_msg) {
+                        IndexError::RetryWithSmallerBatch(eyre!(error_msg))
+                    } else {
+                        IndexError::Retry(eyre!(error_msg))
+                    }
+                })?,
             logs.await
-                .map_err(|e| IndexError::Retry(eyre!("logs {}", e)))?,
+                .map_err(|e| {
+                    let error_msg = format!("logs {}", e);
+                    if is_response_too_large_error(&error_msg) {
+                        IndexError::RetryWithSmallerBatch(eyre!(error_msg))
+                    } else {
+                        IndexError::Retry(eyre!(error_msg))
+                    }
+                })?,
         );
         // It's not uncommon for RPC API providers to respond to
         // log requests with data that is unrelated to the requested block range
