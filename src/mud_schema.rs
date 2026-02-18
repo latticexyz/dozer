@@ -12,7 +12,7 @@ use eyre::{bail, Result, WrapErr};
 use itertools::Itertools;
 use ruint::aliases::U64;
 use serde::{Deserialize, Serialize};
-use tokio_postgres::{error::SqlState, Row, Transaction};
+use tokio_postgres::{Row, Transaction};
 
 use crate::mud_encoding;
 
@@ -653,9 +653,10 @@ impl Schema {
         const Q: &str = r#"
             insert into tables(block_num, log_idx, address, id, name, key_schema, val_schema, key_names, val_names)
             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            on conflict (address, id) do nothing
         "#;
         let name = self.name();
-        match tx
+        let inserted = tx
             .execute(
             Q,
             &[
@@ -671,48 +672,40 @@ impl Schema {
             ],
         )
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                if err
-                    .as_db_error()
-                    .map(|db_err| db_err.code() == &SqlState::UNIQUE_VIOLATION)
-                    .unwrap_or(false)
-                {
-                    const EXISTING_Q: &str = r#"
-                        select name, key_schema, val_schema, key_names, val_names
-                        from tables
-                        where address = $1 and id = $2
-                    "#;
-                    let row = tx
-                        .query_opt(EXISTING_Q, &[&address, &self.table_id])
-                        .await
-                        .wrap_err("loading existing table schema after unique violation")?
-                        .ok_or_else(|| {
-                            eyre::eyre!(
-                                "unique violation but existing row missing (address={}, id={})",
-                                address,
-                                self.table_id
-                            )
-                        })?;
-                    let same = row.try_get::<&str, String>("name")? == name
-                        && row.try_get::<&str, FixedBytes<32>>("key_schema")? == self.key_schema
-                        && row.try_get::<&str, FixedBytes<32>>("val_schema")? == self.val_schema
-                        && row.try_get::<&str, Vec<String>>("key_names")? == self.key_names
-                        && row.try_get::<&str, Vec<String>>("val_names")? == self.val_names;
-                    if same {
-                        Ok(())
-                    } else {
-                        bail!(
-                            "table already exists with different schema (address={}, id={})",
-                            address,
-                            self.table_id
-                        );
-                    }
-                } else {
-                    Err(err).wrap_err("inserting new table")
-                }
-            }
+            .wrap_err("inserting new table")?;
+        if inserted > 0 {
+            return Ok(());
+        }
+
+        const EXISTING_Q: &str = r#"
+            select name, key_schema, val_schema, key_names, val_names
+            from tables
+            where address = $1 and id = $2
+        "#;
+        let row = tx
+            .query_opt(EXISTING_Q, &[&address, &self.table_id])
+            .await
+            .wrap_err("loading existing table schema after insert conflict")?
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "insert conflict but existing row missing (address={}, id={})",
+                    address,
+                    self.table_id
+                )
+            })?;
+        let same = row.try_get::<&str, String>("name")? == name
+            && row.try_get::<&str, FixedBytes<32>>("key_schema")? == self.key_schema
+            && row.try_get::<&str, FixedBytes<32>>("val_schema")? == self.val_schema
+            && row.try_get::<&str, Vec<String>>("key_names")? == self.key_names
+            && row.try_get::<&str, Vec<String>>("val_names")? == self.val_names;
+        if same {
+            Ok(())
+        } else {
+            bail!(
+                "table already exists with different schema (address={}, id={})",
+                address,
+                self.table_id
+            );
         }
     }
 
