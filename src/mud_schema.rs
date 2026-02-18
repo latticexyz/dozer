@@ -658,19 +658,19 @@ impl Schema {
         let name = self.name();
         let inserted = tx
             .execute(
-            Q,
-            &[
-                &U64::from(block_num),
-                &U64::from(log_idx),
-                &address,
-                &self.table_id,
-                &name,
-                &self.key_schema,
-                &self.val_schema,
-                &self.key_names,
-                &self.val_names,
-            ],
-        )
+                Q,
+                &[
+                    &U64::from(block_num),
+                    &U64::from(log_idx),
+                    &address,
+                    &self.table_id,
+                    &name,
+                    &self.key_schema,
+                    &self.val_schema,
+                    &self.key_names,
+                    &self.val_names,
+                ],
+            )
             .await
             .wrap_err("inserting new table")?;
         if inserted > 0 {
@@ -678,7 +678,7 @@ impl Schema {
         }
 
         const EXISTING_Q: &str = r#"
-            select name, key_schema, val_schema, key_names, val_names
+            select block_num, log_idx, name, key_schema, val_schema, key_names, val_names
             from tables
             where address = $1 and id = $2
         "#;
@@ -694,12 +694,14 @@ impl Schema {
                 )
             })?;
         let existing_name = row.try_get::<&str, String>("name")?;
+        let existing_block_num = row.try_get::<&str, U64>("block_num")?.to::<u64>();
+        let existing_log_idx = row.try_get::<&str, U64>("log_idx")?.to::<u64>();
         let existing_key_schema = row.try_get::<&str, FixedBytes<32>>("key_schema")?;
         let existing_val_schema = row.try_get::<&str, FixedBytes<32>>("val_schema")?;
         let existing_key_names = row.try_get::<&str, Vec<String>>("key_names")?;
         let existing_val_names = row.try_get::<&str, Vec<String>>("val_names")?;
-        let schema_same = existing_key_schema == self.key_schema
-            && existing_val_schema == self.val_schema;
+        let schema_same =
+            existing_key_schema == self.key_schema && existing_val_schema == self.val_schema;
         let names_same = existing_name == name
             && existing_key_names == self.key_names
             && existing_val_names == self.val_names;
@@ -724,12 +726,42 @@ impl Schema {
         );
         const UPDATE_Q: &str = r#"
             update tables
-            set name = $3, key_names = $4, val_names = $5
-            where address = $1 and id = $2
+            set
+                name = $3,
+                key_names = $4,
+                val_names = $5,
+                block_num = $6,
+                log_idx = $7
+            where address = $1
+              and id = $2
+              and (block_num, log_idx) <= ($6, $7)
         "#;
-        tx.execute(UPDATE_Q, &[&address, &self.table_id, &name, &self.key_names, &self.val_names])
+        let updated = tx
+            .execute(
+                UPDATE_Q,
+                &[
+                    &address,
+                    &self.table_id,
+                    &name,
+                    &self.key_names,
+                    &self.val_names,
+                    &U64::from(block_num),
+                    &U64::from(log_idx),
+                ],
+            )
             .await
             .wrap_err("updating table column names")?;
+        if updated == 0 {
+            tracing::info!(
+                "ignoring stale table name update (address={}, id={}) existing=({},{}) new=({},{})",
+                address,
+                self.table_id,
+                existing_block_num,
+                existing_log_idx,
+                block_num,
+                log_idx,
+            );
+        }
         Ok(())
     }
 
