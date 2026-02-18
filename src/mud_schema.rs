@@ -8,7 +8,7 @@ use alloy::{
     sol,
     sol_types::SolType,
 };
-use eyre::{Result, WrapErr};
+use eyre::{bail, Result, WrapErr};
 use itertools::Itertools;
 use ruint::aliases::U64;
 use serde::{Deserialize, Serialize};
@@ -650,6 +650,31 @@ impl Schema {
         log_idx: u64,
         address: FixedBytes<20>,
     ) -> Result<()> {
+        const EXISTING_Q: &str = r#"
+            select name, key_schema, val_schema, key_names, val_names
+            from tables
+            where address = $1 and id = $2
+        "#;
+        if let Some(row) = tx
+            .query_opt(EXISTING_Q, &[&address, &self.table_id])
+            .await
+            .wrap_err("checking existing table schema")?
+        {
+            let same = row.try_get::<&str, String>("name")? == self.name()
+                && row.try_get::<&str, FixedBytes<32>>("key_schema")? == self.key_schema
+                && row.try_get::<&str, FixedBytes<32>>("val_schema")? == self.val_schema
+                && row.try_get::<&str, Vec<String>>("key_names")? == self.key_names
+                && row.try_get::<&str, Vec<String>>("val_names")? == self.val_names;
+            if same {
+                return Ok(());
+            }
+            bail!(
+                "table already exists with different schema (address={}, id={})",
+                address,
+                self.table_id
+            );
+        }
+
         const Q: &str = r#"
             insert into tables(block_num, log_idx, address, id, name, key_schema, val_schema, key_names, val_names)
             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
