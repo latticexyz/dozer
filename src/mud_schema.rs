@@ -698,14 +698,15 @@ impl Schema {
         let existing_val_schema = row.try_get::<&str, FixedBytes<32>>("val_schema")?;
         let existing_key_names = row.try_get::<&str, Vec<String>>("key_names")?;
         let existing_val_names = row.try_get::<&str, Vec<String>>("val_names")?;
-        let same = existing_name == name
-            && existing_key_schema == self.key_schema
-            && existing_val_schema == self.val_schema
+        let schema_same = existing_key_schema == self.key_schema
+            && existing_val_schema == self.val_schema;
+        let names_same = existing_name == name
             && existing_key_names == self.key_names
             && existing_val_names == self.val_names;
-        if same {
-            Ok(())
-        } else {
+        if schema_same && names_same {
+            return Ok(());
+        }
+        if !schema_same {
             bail!(
                 "table already exists with different schema (address={}, id={})\n  existing: name={}, key_schema={}, val_schema={}, key_names={:?}, val_names={:?}\n  new:      name={}, key_schema={}, val_schema={}, key_names={:?}, val_names={:?}",
                 address,
@@ -714,6 +715,22 @@ impl Schema {
                 name, self.key_schema, self.val_schema, self.key_names, self.val_names,
             );
         }
+        tracing::info!(
+            "table column names changed (address={}, id={})\n  existing: name={}, key_names={:?}, val_names={:?}\n  new:      name={}, key_names={:?}, val_names={:?}",
+            address,
+            self.table_id,
+            existing_name, existing_key_names, existing_val_names,
+            name, self.key_names, self.val_names,
+        );
+        const UPDATE_Q: &str = r#"
+            update tables
+            set name = $3, key_names = $4, val_names = $5
+            where address = $1 and id = $2
+        "#;
+        tx.execute(UPDATE_Q, &[&address, &self.table_id, &name, &self.key_names, &self.val_names])
+            .await
+            .wrap_err("updating table column names")?;
+        Ok(())
     }
 
     pub fn description(&self) -> String {
