@@ -1,6 +1,6 @@
 # Dozer: an indexer for MUD
 
-<img src="https://github.com/latticexyz/dozer/blob/master/dozer.png?raw=true" width=200px />
+<img src="https://github.com/latticexyz/dozer/blob/main/dozer.png?raw=true" width=200px />
 
 - [Logs API](#logs-api)
 - [Config](#config)
