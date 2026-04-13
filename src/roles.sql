@@ -4,6 +4,7 @@
 
 -- these settings are designed to be run
 -- on the database's initial setup.
+-- replace PLACEHOLDER_PASSWORD with a real password when running this on initial setup
 create role uapi with login password 'PLACEHOLDER_PASSWORD' noinherit;
 
 revoke all on all tables in schema public from uapi;

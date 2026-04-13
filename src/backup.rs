@@ -17,11 +17,7 @@ use tokio::{
 
 #[derive(Parser)]
 pub struct Args {
-    #[clap(
-        long = "backup-bucket",
-        env = "DOZER_BACKUP_BUCKET",
-        default_value = "lattice-dozer-backups"
-    )]
+    #[clap(long = "backup-bucket", env = "DOZER_BACKUP_BUCKET")]
     bucket: String,
 
     #[clap(long = "backup-dir", env = "DOZER_BACKUP_DIR", default_value = ".")]
