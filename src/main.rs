@@ -249,7 +249,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
     });
 
     let eth_client = ProviderBuilder::new().on_http(args.eth_url);
-    {
+    if !args.no_index {
         let pgtx = w_pg
             .transaction()
             .await
@@ -297,7 +297,7 @@ async fn server(args: ServerArgs) -> eyre::Result<()> {
 
     let service = tower::ServiceBuilder::new()
         .layer(tracing)
-        .layer(TimeoutLayer::new(Duration::from_secs(10)))
+        .layer(TimeoutLayer::new(Duration::from_secs(60 * 5)))
         .layer(CompressionLayer::new());
 
     let (app, listener) = (

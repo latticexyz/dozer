@@ -29,7 +29,9 @@ where
 #[derive(Clone, Deserialize, Debug)]
 pub struct LogsRequest {
     input: String,
-    block_num: Option<u64>,
+    from_block_num: Option<u64>,
+    to_block_num: Option<u64>,
+    block_num: Option<u64>, // deprecated, but kept for backwards compat
     include_tx_hash: Option<bool>,
 }
 
@@ -72,13 +74,26 @@ impl Log {
         let (ename, sd, el, dd) = if row.get("deleted") {
             (String::from("Store_DeleteRecord"), None, None, None)
         } else {
+            let encoded_lengths_raw: Vec<u8> = row.try_get("encoded_lengths")?;
+            let dynamic_data_raw: Vec<u8> = row.try_get("dynamic_data")?;
+            let static_data = Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?);
+
+            let dynamic_data = if encoded_lengths_raw == [0u8; 32] {
+                Bytes::new()
+            } else {
+                let len = {
+                    let mut len_bytes = [0u8; 8];
+                    len_bytes[1..].copy_from_slice(&encoded_lengths_raw[25..]);
+                    usize::from_be_bytes(len_bytes)
+                };
+                Bytes::copy_from_slice(&dynamic_data_raw[..len.min(dynamic_data_raw.len())])
+            };
+
             (
                 String::from("Store_SetRecord"),
-                Some(Bytes::from(row.try_get::<&str, Vec<u8>>("static_data")?)),
-                Some(Bytes::from(
-                    row.try_get::<&str, Vec<u8>>("encoded_lengths")?,
-                )),
-                Some(Bytes::from(row.try_get::<&str, Vec<u8>>("dynamic_data")?)),
+                Some(static_data),
+                Some(Bytes::from(encoded_lengths_raw)),
+                Some(dynamic_data),
             )
         };
         Ok(Log {
@@ -135,7 +150,20 @@ pub async fn handle(
 ) -> Result<Json<LogsResponse>, api::Error> {
     let include_tx_hash = query.include_tx_hash;
     let req_input: LogsRequestInput = serde_json::from_str(&query.input)?;
-    let query = LogsQuery::new(query.block_num, req_input);
+
+    let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
+
+    // fall back to `block_num` for backwards-compatibility
+    let from_block = query.from_block_num.or(query.block_num);
+    let to_block = match query.to_block_num {
+        Some(to) => Some(to),
+        None => {
+            let row = pg.query_one("select max(num) from blocks", &[]).await?;
+            Some(row.get::<_, U64>(0).try_into().unwrap())
+        }
+    };
+
+    let query = LogsQuery::new(from_block, to_block, req_input);
 
     let params: &[&(dyn ToSql + Sync)] = &query
         .params
@@ -143,20 +171,19 @@ pub async fn handle(
         .map(|b| b.as_ref() as &(dyn ToSql + Sync))
         .collect::<Vec<_>>()[..];
 
-    let pg = state.pool.get().await.wrap_err("unable to get pg conn")?;
     let res: Vec<Log> = pg
         .query(&query.to_sql(include_tx_hash.unwrap_or(false)), params)
         .await?
         .iter()
+        .filter(|row| query.from_block_num.is_some() || !row.get::<_, bool>("deleted"))
         .map(Log::from_row)
         .collect::<Result<Vec<Log>, _>>()?
         .into_iter()
         .sorted_by_key(|l| (l.block_num, l.log_idx))
         .collect_vec();
 
-    let bres = pg.query_one("select max(num) from blocks", &[]).await?;
     Ok(Json(LogsResponse {
-        block_num: bres.get::<usize, U64>(0).to(),
+        block_num: to_block.unwrap().into(),
         logs: res,
     }))
 }
@@ -181,7 +208,8 @@ type Param = (dyn ToSql + Sync + Send);
 
 #[derive(Default, Debug)]
 struct LogsQuery {
-    min_block_num: Option<u64>,
+    from_block_num: Option<u64>,
+    to_block_num: Option<u64>,
     or_predicates: Vec<String>,
     and_predicates: Vec<String>,
     num_params: i32,
@@ -189,9 +217,14 @@ struct LogsQuery {
 }
 
 impl LogsQuery {
-    fn new(min_block_num: Option<u64>, input: LogsRequestInput) -> Self {
+    fn new(
+        from_block_num: Option<u64>,
+        to_block_num: Option<u64>,
+        input: LogsRequestInput,
+    ) -> Self {
         let mut query = LogsQuery {
-            min_block_num,
+            from_block_num,
+            to_block_num,
             num_params: 0,
             and_predicates: vec![],
             or_predicates: vec![],
@@ -249,54 +282,57 @@ impl LogsQuery {
     }
 
     fn to_sql(&self, include_tx_hash: bool) -> String {
-        let block_num_predicate = if let Some(n) = self.min_block_num {
-            format!("and block_num >= {}", n)
+        let from_block_predicate = if let Some(from_block) = self.from_block_num {
+            format!("and block_num >= {}", from_block)
         } else {
-            String::from("and not deleted")
+            String::new()
         };
+
+        let to_block_predicate = if let Some(to_block) = self.to_block_num {
+            format!("and block_num <= {}", to_block)
+        } else {
+            String::new()
+        };
+
         let tx_hash = if include_tx_hash {
             String::from("tx_hash,")
         } else {
             String::new()
         };
-        format!(
+
+        let sql = format!(
             r#"
             select
-                block_num,
-                {}
-                log_idx,
-                address,
-                table_id,
-                key,
-                static_data,
-                CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x00'::bytea
-                    ELSE encoded_lengths
-                END AS encoded_lengths,
-                CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x'::bytea
-                    ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
-                END AS dynamic_data,
-                deleted
-            from records
-            where not expired
-            and address = $1
-            {}
-            {}
+                r.block_num,
+                r.log_idx,
+                {tx_hash}
+                r.address,
+                r.table_id,
+                r.key,
+                r.static_data,
+                r.encoded_lengths,
+                r.dynamic_data,
+                r.deleted
+            from (
+                select distinct on (table_id, key)
+                    address, table_id, key, block_num, log_idx
+                from records
+                where address = $1
+                {to_block_predicate}
+                {from_block_predicate}
+                {filters}
+                order by table_id, key, block_num desc, log_idx desc
+            ) latest
+            join records r using (address, table_id, key, block_num, log_idx)
+            order by block_num, log_idx, address, table_id, key
             "#,
-            tx_hash,
-            block_num_predicate,
-            self.filters_sql()
-        )
+            tx_hash = tx_hash,
+            to_block_predicate = to_block_predicate,
+            from_block_predicate = from_block_predicate,
+            filters = self.filters_sql()
+        );
+
+        return sql;
     }
 }
 
@@ -328,6 +364,7 @@ mod tests {
         .expect("setting up records table");
 
         let query = LogsQuery::new(
+            None,
             None,
             LogsRequestInput {
                 _chain_id: Some(690),
@@ -381,6 +418,7 @@ mod tests {
     fn test_logs_query_empty_filters() {
         let query = LogsQuery::new(
             None,
+            None,
             LogsRequestInput {
                 _chain_id: Some(690),
                 address: Some(FixedBytes::<20>::with_last_byte(1)),
@@ -391,35 +429,41 @@ mod tests {
             test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
             test_utils::fmt_sql(
                 r#"
-                select
+                SELECT
+                    r.block_num,
+                    r.log_idx,
+                    r.address,
+                    r.table_id,
+                    r.key,
+                    r.static_data,
+                    r.encoded_lengths,
+                    r.dynamic_data,
+                    r.deleted
+                FROM
+                    (
+                        SELECT DISTINCT
+                            ON (table_id, key) address,
+                            table_id,
+                            key,
+                            block_num,
+                            log_idx
+                        FROM
+                            records
+                        WHERE
+                            address = $1
+                        ORDER BY
+                            table_id,
+                            key,
+                            block_num DESC,
+                            log_idx DESC
+                    ) AS latest
+                    JOIN records AS r USING (address, table_id, key, block_num, log_idx)
+                ORDER BY
                     block_num,
                     log_idx,
                     address,
                     table_id,
-                    key,
-                    static_data,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x00'::bytea
-                        ELSE encoded_lengths
-                    END AS encoded_lengths,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x'::bytea
-                        ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
-                    END AS dynamic_data,
-                    deleted
-                from records
-                where not expired
-                and address = $1
-                and not deleted
+                    key
                 "#
             )
             .unwrap()
@@ -427,9 +471,10 @@ mod tests {
     }
 
     #[test]
-    fn test_logs_query_min_block_num() {
+    fn test_logs_query_from_block_num() {
         let query = LogsQuery::new(
             Some(42),
+            None,
             LogsRequestInput {
                 _chain_id: Some(690),
                 address: Some(FixedBytes::<20>::with_last_byte(1)),
@@ -440,35 +485,42 @@ mod tests {
             test_utils::fmt_sql(&query.to_sql(false)).expect("invalid sql"),
             test_utils::fmt_sql(
                 r#"
-                select
+                SELECT
+                    r.block_num,
+                    r.log_idx,
+                    r.address,
+                    r.table_id,
+                    r.key,
+                    r.static_data,
+                    r.encoded_lengths,
+                    r.dynamic_data,
+                    r.deleted
+                FROM
+                    (
+                        SELECT DISTINCT
+                            ON (table_id, key) address,
+                            table_id,
+                            key,
+                            block_num,
+                            log_idx
+                        FROM
+                            records
+                        WHERE
+                            address = $1
+                            AND block_num >= 42
+                        ORDER BY
+                            table_id,
+                            key,
+                            block_num DESC,
+                            log_idx DESC
+                    ) AS latest
+                    JOIN records AS r USING (address, table_id, key, block_num, log_idx)
+                ORDER BY
                     block_num,
                     log_idx,
                     address,
                     table_id,
-                    key,
-                    static_data,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x00'::bytea
-                        ELSE encoded_lengths
-                    END AS encoded_lengths,
-                    CASE
-                        WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                        THEN '\x'::bytea
-                        ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
-                    END AS dynamic_data,
-                    deleted
-                from records
-                where not expired
-                and address = $1
-                and block_num >= 42
+                    key
                 "#
             )
             .unwrap()
@@ -478,6 +530,7 @@ mod tests {
     #[test]
     fn test_logs_query() {
         let query = LogsQuery::new(
+            None,
             None,
             LogsRequestInput {
                 _chain_id: Some(690),
@@ -492,40 +545,54 @@ mod tests {
         assert_eq!(query.params.len(), 5);
         assert_eq!(
             test_utils::fmt_sql(&query.to_sql(false)).unwrap(),
-            test_utils::fmt_sql(r#"
-            SELECT
-                block_num,
-                log_idx,
-                address,
-                table_id,
-                key,
-                static_data,
-                CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x00'::bytea
-                    ELSE encoded_lengths
-                END AS encoded_lengths,
-                CASE
-                    WHEN encoded_lengths = '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea
-                    THEN '\x'::bytea
-                    ELSE substring(dynamic_data, 1,
-                         (get_byte(encoded_lengths, 25) << 48) |
-                         (get_byte(encoded_lengths, 26) << 40) |
-                         (get_byte(encoded_lengths, 27) << 32) |
-                         (get_byte(encoded_lengths, 28) << 24) |
-                         (get_byte(encoded_lengths, 29) << 16) |
-                         (get_byte(encoded_lengths, 30) << 8) |
-                         get_byte(encoded_lengths, 31))
-                END AS dynamic_data,
-                deleted
-            FROM records
-            WHERE NOT expired
-            AND address = $1
-            AND NOT deleted
-            AND (
-                (table_id = $2 AND sdec(key, 0, 32) = $3 AND sdec(key, 32, 32) = $4)
-                OR
-                (table_id = $5)
-        )"#).unwrap());
+            test_utils::fmt_sql(
+                r#"
+                SELECT
+                    r.block_num,
+                    r.log_idx,
+                    r.address,
+                    r.table_id,
+                    r.key,
+                    r.static_data,
+                    r.encoded_lengths,
+                    r.dynamic_data,
+                    r.deleted
+                FROM
+                    (
+                        SELECT DISTINCT
+                            ON (table_id, key) address,
+                            table_id,
+                            key,
+                            block_num,
+                            log_idx
+                        FROM
+                            records
+                        WHERE
+                            address = $1
+                            AND (
+                                (
+                                    table_id = $2
+                                    AND sdec (key, 0, 32) = $3
+                                    AND sdec (key, 32, 32) = $4
+                                )
+                                OR (table_id = $5)
+                            )
+                        ORDER BY
+                            table_id,
+                            key,
+                            block_num DESC,
+                            log_idx DESC
+                    ) AS latest
+                    JOIN records AS r USING (address, table_id, key, block_num, log_idx)
+                ORDER BY
+                    block_num,
+                    log_idx,
+                    address,
+                    table_id,
+                    key
+                "#
+            )
+            .unwrap()
+        );
     }
 }

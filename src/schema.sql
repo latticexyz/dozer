@@ -86,6 +86,17 @@ create index if not exists "records_key_1" on records(sdec(key, 32, 32)) where n
 
 create index if not exists "records_block_num" on records(block_num desc) where not expired and not deleted;
 
+-- for faster snapshots
+create index if not exists "records_latest"
+on records(address, table_id, key, block_num desc, log_idx desc)
+include (deleted);
+
+-- for faster snapshots for DUST world
+create index if not exists "dust_records_latest"
+on records(table_id, key, block_num desc, log_idx desc)
+include (address, deleted)
+where address = '\x253eb85b3c953bfe3827cc14a151262482e7189c';
+
 create table if not exists tables(
     block_num numeric,
     log_idx numeric,
