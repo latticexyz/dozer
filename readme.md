@@ -243,3 +243,7 @@ Restore from the latest backup in S3
 ```
 dozer restore --pg-url postgres://localhost/dozer
 ```
+
+## License
+
+Dozer is open-source software licensed under the [MIT License](LICENSE).
